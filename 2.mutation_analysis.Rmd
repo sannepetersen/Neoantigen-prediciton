@@ -1,0 +1,2083 @@
+---
+title: "Mutation analysis"
+date: "2025-04-25"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Preparation
+
+## Install packages
+
+```{r install packages, include=FALSE}
+options(repos = c(CRAN = "https://cloud.r-project.org/"))
+
+# Install packages
+install.packages("vroom")
+install.packages("readr")
+install.packages("dplyr")
+install.packages("R.utils")
+install.packages("tidyr")
+install.packages('BiocManager')
+install.packages("data.table")
+install.packages('ggplot2')
+install.packages('viridis')
+install.packages('tidyverse')
+install.packages("pathwayTMB")
+install.packages("FSA")  
+
+# Install packages from biomanager
+BiocManager::install("rtracklayer")
+BiocManager::install("GenomicFeatures")
+BiocManager::install("IRanges")
+BiocManager::install("BSgenome.Hsapiens.UCSC.hg38")
+BiocManager::install("biomaRt")
+BiocManager::install("maftools")
+
+# Install.packages from github
+remotes::install_github('CCICB/vcf2mafR')
+
+```
+
+## Load packages
+
+```{r load packages, include=FALSE}
+
+# Load packages
+library(vroom)
+library(readr)
+library(dplyr)
+library(R.utils)
+library(tidyr)
+library(BiocManager)
+library(rtracklayer)
+library(IRanges)
+library(data.table)
+library(ggplot2)
+library(BSgenome)
+library(BSgenome.Hsapiens.UCSC.hg38)  
+library(biomaRt)
+library(viridis)
+library(tidyverse)
+library(maftools)
+library(vcf2mafR)
+library(RColorBrewer)
+library(pathwayTMB)
+library(maftools)
+library(patchwork)
+library(FSA)
+library(VennDiagram)
+library(colorspace)
+```
+
+## Patient IDs per histology
+
+```{r}
+
+# PatientIDs of patients with synchronous DCIS & IDC
+patients_with_both <- c('0169', '0193', '0332', '0355', '7419', '7402')
+
+samples_with_both <- c('DCIS_0169', 'DCIS_0193', 'DCIS_0332', 'DCIS_0355', 'DCIS_7419', 'DCIS_7402', 'IDC_0169', 'IDC_0193', 'IDC_0332', 'IDC_0355', 'IDC_7419', 'IDC_7402')
+
+# PatientIDs of patients with pure IDC
+patients_only_idc <- c('0198', '0443', '0493', '0496', '0553', '0445')
+
+# PatientIDs of patients with pure DCIS
+patients_only_dcis <- c('7363', '7379', '7386', '7408', '7416', '7420',
+                        '0232')
+
+# Patients with synchronous DCIS & IDC
+synchronous_patients <- c('0169', '0193', '0332', '0355', '7419', '7402', '0375', '0387', 
+                           '0537', '0648', '0711', '7389', '7394', '0455')
+
+
+```
+
+## Color determination
+
+```{r}
+# Determine colors
+histology_colors <- c(
+    "pure DCIS (n=7)" = "#1f77b4", 
+    "pure IDC (n=6)" = "#d73027", 
+    "DCIS & IDC (n=20)" = "#4DAF4A")
+
+# Determine colors
+histology_colors_simple <- c(
+    "DCIS" = "#1f77b4", 
+    "IDC" = "#d73027")
+```
+
+## Load combined_all
+
+data from load_data.rmd after filtering.
+
+```{r}
+
+# File path to combined all txt file
+file_path <- c("R:/Group Wesseling/03-Projects/BC_CFMPB669_HeritX/03-Data/05-WES/gcf7322/sanne_R/combined_all.txt")
+
+# Path for when working on macbook
+file_path_mac <- c("/Users/sannepetersen/Documents/Bioinformatics and systems biology/NKI Bioinformatics/Bestanden/combined_all.txt")
+
+# Load combined all df
+combined_all <- read_tsv(file_path_mac, show_col_types = FALSE)
+
+# Make sure they all got 4 letters (the 0 disappeared sometimes)
+combined_all <- combined_all %>%
+  mutate(PatientID = if_else(type == "Unknown" & nchar(PatientID) == 3,
+                             paste0("0", PatientID),
+                             PatientID))
+
+# Add a 'type' column based on patient group
+combined_all <- combined_all %>%
+  mutate(type = case_when(
+    PatientID %in% synchronous_patients ~ "DCIS & IDC (n=20)",
+    PatientID %in% patients_only_idc ~ "pure IDC (n=6)",
+    PatientID %in% patients_only_dcis ~ "pure DCIS (n=7)",
+    TRUE ~ "Unknown" 
+  ))
+```
+
+## Total number of mutations
+
+```{r}
+
+# The total number of mutations
+total_mutations <- nrow(combined_all)
+```
+
+# Gene selection
+
+## Selected genes paper Nik-Zainal
+
+```{r}
+# Names of the breast cancer genes in the paper
+genes_Nik_Zainal <- c(
+  "TP53", "PIK3CA", "MYC", "CCND1", "PTEN", "ERBB2", "ZNF703", "FGFR1", "GATA3", "RB1", "MAP3K1", 
+  "MAP2K4", "ZNF217", "CDH1", "MLL3", "ARID1B", "CDKN2A", "MLLT4", "AKT1", "FBXW7", "ARID1A", 
+  "CCND3", "CBFB", "MDM2", "CCNE1", "CDKN2B", "NCOR1", "SF3B1", "SPEN", "TBX3", "IGF1R", "BRCA2", 
+  "NF1", "PIK3R1", "EGFR", "KRAS", "ESR1", "FOXA1", "MED23", "CDK6", "NOTCH2", "AKT2", "BRCA1", 
+  "CTCF", "KDM6A", "SETD2", "CREBBP", "DNMT3A", "FOXP1", "MLL2", "RUNX1", "USP9X", "XBP1", 
+  "PDGFRA", "ATR", "ERBB3", "FGFR2", "PALB2", "RHOA", "SMAD4", "ATM", "ATRX", "AXIN1", "BCOR", 
+  "CDKN1B", "CUX1", "GNAS", "MLH1", "NOTCH1", "PHF6", "SMARCA4", "STAG2", "ZFP36L1", "APC", 
+  "CASP8", "CBLB", "CNOT3", "ECT2L", "MEN1", "MSH2", "NRAS", "PBRM1", "PMS2", "STK11", "TET2", 
+  "ASXL1", "BRAF", "BUB1B", "CIC", "ERCC4", "HRAS", "NF2", "PRDM1", "PREX"
+)
+
+```
+
+## Selected genes paper E. Lips
+
+```{r}
+# Names of the breast cancer genes in the paper
+genes_esther_lips <- c('PIK3CA', 'TP53', 'NF1', 'KMT2C', 'ATM', 'NCOR1', 'MAP3K1', 'GATA3', 'PIK3R1', 'TBX3', 'ERBB3', 'ARID1A', 'MAP2K4', 'ERBB2', 'CBFB', 'CDH1', 'RUNX1', 'CHEK2', 'BRCA1', 'BRCA2', 'SMAD4')
+
+
+```
+
+## Selected genes BRCA GDGDP
+
+```{r}
+# Select genes from GDGDP BRCA mutated cohort
+genes_brca_gdgdp <- c('PIK3CA', 'TP53', 'CDH1', 'MUC16', 'GATA3', 'KMT2C',
+                'MAP3K1', 'PTEN', 'NCOR1', 'FAT3', 'CSMD3', 'NF1', 'RUNX1',
+                'LRP1B', 'SPEN', 'MAP2K4', 'ARID1A', 'KMT2D', 'FAT1', 'TBX3')
+
+```
+
+## Combined_genes
+
+```{r}
+# Create one list with all BRCA related genes from the three previous sources
+combined_genes <- union(genes_brca_gdgdp, genes_Nik_Zainal)
+combined_genes <- union(combined_genes, genes_esther_lips)
+```
+
+# Results
+
+## Top gene and patient count
+
+```{r}
+
+# Count the number of mutations for each gene
+top_genes <- combined_all %>%
+  group_by(Gene) %>%
+  summarise(mutation_count = n()) %>%  
+  arrange(desc(mutation_count)) 
+
+# See which mutations are most occuring and in how many patients
+top_genes_all <- combined_all %>%
+  group_by(Gene) %>%
+  summarise(
+    mutation_count = n(), 
+    unique_patients = n_distinct(PatientID)  
+  ) %>%
+  arrange(desc(unique_patients)) 
+
+```
+
+## Mutation count
+
+### Per histology
+
+```{r}
+# Summarize the total number of mutations per histology
+mutation_summary_total <- combined_all %>%
+  group_by(type) %>%
+  summarise(total_count = n())
+```
+
+### Average number of mutations per histology
+
+```{r}
+# Count the number of samples per type (+1 since one patient has 0 mutations)
+sample_counts <- combined_all %>%
+  group_by(type) %>%
+  summarise(num_samples = n_distinct(Sample_tumor)) %>%
+  mutate(num_samples = if_else(type == "DCIS & IDC (n=20)", num_samples + 1, num_samples))
+
+# Calculate on average the number of mutations per histology
+mutation_summary_avg <- mutation_summary_total %>%
+  left_join(sample_counts, by = "type") %>%
+  mutate(avg_per_sample = total_count / num_samples)
+```
+
+### Average number of mutations per patient
+
+```{r}
+
+# synchronous vs pure dcis
+dcis_group <- combined_all[combined_all$group == 'DCIS', ]
+dcis_group_count <- dcis_group %>%
+  group_by(type, sample) %>%
+  summarize(count = n())
+
+
+# see for each sample how many mutations it has
+mutation_summary_total_patient <- combined_all %>%
+  group_by(type, sample) %>%
+  summarise(total_count = n())
+
+# Create a dataframe with patients without mutations
+missing_patients <- tibble(
+  type = c("DCIS & IDC (n=20)"),
+  sample = c("DCIS_7389"),
+  total_count = c(0)
+)
+
+# Add missing patients to the main summary dataframe
+mutation_summary_total_patient <- bind_rows(mutation_summary_total_patient, missing_patients)
+
+# Calculate the median per type
+mutation_summary_median <- mutation_summary_total_patient %>%
+  group_by(type) %>%
+  summarise(median_per_sample = median(total_count), .groups = "drop")
+
+# Calculate the median per type
+mutation_summary_mean <- mutation_summary_total_patient %>%
+  group_by(type) %>%
+  summarise(mean_per_sample = mean(total_count), .groups = "drop")
+
+# Calculate the median and mean number of mutations
+mutation_median <- median(mutation_summary_total_patient$total_count)
+mutation_mean <- mean(mutation_summary_total_patient$total_count)
+
+# Plot number of mutations per patient
+ggplot(mutation_summary_total_patient, 
+       aes(x = reorder(sample, total_count), y = total_count, fill = type)) + 
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) + 
+  geom_text(aes(label = total_count), 
+            position = position_dodge(width = 0.9), 
+            vjust = 0.5, size = 2, angle = 90, hjust = -0.5) + 
+  geom_hline(yintercept = mutation_median, linetype = "dashed", color = "black", size = 0.3) + 
+  annotate("text", x = Inf, y = mutation_median, label = paste("Median =", mutation_median), 
+           vjust = -19, hjust = 6, color = "black", size = 3) + 
+  labs(title = "Total Number of Mutations per Patient", 
+       x = "Patient ID", 
+       y = "# of Mutations", 
+       fill = 'Condition') + 
+  ylim(0, 6000) + 
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 1)) + 
+  scale_fill_manual(values = histology_colors
+  )
+
+```
+
+## Piechart mutation types
+
+```{r}
+# Summarize mutation-specific counts and calculate correct percentages
+mutation_summary <- combined_all %>%
+  group_by(mutation, type) %>%
+  summarise(count = n(), .groups = "drop") %>%  
+  left_join(mutation_summary_total, by = "type") %>% 
+  mutate(percentage = (count / total_count) * 100) 
+
+# Define colors
+colors1 <- brewer.pal(n = 3, name = "Set1")
+colors2 <- brewer.pal(n = 4, name = "Dark2")
+colors3 <- viridis(3, option = 'B')
+colors <- c(colors1, colors3, colors2)
+
+# Identify the top 3 mutations by percentage for each "type"
+top_mutations <- mutation_summary %>%
+  group_by(type) %>%
+  slice_max(order_by = percentage, n = 3) 
+
+# Identify the top 3 mutations by percentage across all
+mutation_summary_all <- combined_all %>%
+  group_by(mutation) %>%
+  summarise(count = n(), .groups = "drop") %>%  
+  mutate(percentage = (count / total_mutations) * 100) 
+
+# Create pie charts faceted by "type" with labels for top 3 mutations
+ggplot(mutation_summary, aes(x = "", y = percentage, fill = mutation)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y", start = 0) +
+  labs(fill = "Mutation type", title = " ") +
+  scale_fill_manual(values = colors) +  
+  theme_void() +
+  theme(legend.position = "right", 
+        legend.text = element_text(size = 5),
+        legend.key.size = unit(0.4, "cm"),   
+    legend.spacing.y = unit(0.2, "cm"))+
+  facet_wrap(~ type)  
+
+
+# Add a label position angle
+top_mutations <- top_mutations %>%
+  group_by(type) %>%
+  mutate(
+    ypos = cumsum(percentage) - 0.5 * percentage,  # label position
+    label = paste0(round(percentage, 1), "%")      # only percentage
+  )
+
+
+```
+
+## Plot mutation count
+
+### DCIS vs synchronous DCIS-IDC vs IDC
+
+Interquartile range (vertical line) and median (point) in darkred
+
+```{r}
+
+# Pick colors
+my_colors <- brewer.pal(n = 3, name = "Set1")
+
+# Define the order of the x-axis
+mutation_summary_total_patient$type <- factor(
+  mutation_summary_total_patient$type,
+  levels = c("pure DCIS (n=7)", "DCIS & IDC (n=20)", "pure IDC (n=6)")
+)
+
+# Violin plot 
+ggplot(mutation_summary_total_patient, aes(x = type, y = total_count, fill = type)) +
+  geom_violin(alpha = 1, trim = FALSE, color = NA) +
+  geom_jitter(color = "black", width = 0.15, size = 1.8, alpha = 1) +
+  stat_summary(
+    fun.data = function(y) {
+      data.frame(y = median(y), ymin = quantile(y, 0.25), ymax = quantile(y, 0.75))
+    },
+    geom = "pointrange", color = "darkred", size = 0.4
+  ) +
+  scale_fill_manual(values = histology_colors) +
+  labs(
+    title = "mutation count by Sample Type",
+    x = NULL,
+    y = "# of mutations per patient"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10)
+  )
+
+
+# Create a dataframe with patients without mutations
+missing_patients <- tibble(
+  type = c("DCIS & IDC (n=20)"),
+  sample = c("DCIS_7389"),
+  total_count = c(0)
+)
+
+# Add missing patients to the main summary dataframe
+mutation_summary_total_patient <- bind_rows(mutation_summary_total_patient, missing_patients)
+
+# Perform tests
+kruskal.test(total_count ~ type, data = mutation_summary_total_patient)
+
+```
+
+### Synchronous DCIS-IDC
+
+```{r}
+
+# Extract part before the underscore
+mutation_summary_total_patient$group <- sub("_.*", "", mutation_summary_total_patient$sample)
+mutation_summary_total_patient$patient <- sub(".*_", "", mutation_summary_total_patient$sample)
+
+# Obtain the synchronous samples
+synchronous_DCIS_IDC <- mutation_summary_total_patient[mutation_summary_total_patient$sample %in% samples_with_both, ]
+
+synchronous_DCIS_IDC <- mutation_summary_total_patient[mutation_summary_total_patient$patient %in% synchronous_patients, ]
+
+# Get unique groups to match color vector length
+group_levels <- unique(synchronous_DCIS_IDC$group)
+
+# Plot
+ggplot(synchronous_DCIS_IDC, aes(x = group, y = total_count, fill = group)) +
+  geom_violin(alpha = 1, trim = FALSE, color = NA) +
+  geom_point(color = "black", size = 2, alpha = 1) +
+  geom_line(aes(group = patient), color = "black", size = 0.5, alpha = 0.6) +
+  stat_summary(
+    fun.data = function(y) {
+      data.frame(
+        y = median(y),
+        ymin = quantile(y, 0.25),
+        ymax = quantile(y, 0.75)
+      )
+    },
+    geom = "pointrange", color = "#D1495B", size = 0.4
+  ) +
+  scale_fill_manual(values = rep('#4DAF4A', length(group_levels))) +  # make all groups the same color
+  labs(
+    title = "Synchronous DCIS vs. IDC # of mutations per patient",
+    x = NULL,
+    y = "# of mutations per patient"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    axis.text.x = element_text(size = 11),
+    axis.text.y = element_text(size = 11)
+  )
+
+
+# Calculate the mean and the median
+mean_median_synch_mut <- synchronous_DCIS_IDC %>%
+  group_by(group) %>%
+  summarize(min = min(total_count), 
+            median = median(total_count), 
+            max = max(total_count))
+
+# Separate the sample column into group and patient
+reshaped_data <- synchronous_DCIS_IDC %>%
+  separate(sample, into = c("group", "patient"), sep = "_") %>%
+  mutate(group = ifelse(grepl("DCIS", group), "DCIS", "IDC"))   
+
+# Pivot the data so each patient has one row with SNV counts for DCIS and IDC
+reshaped_data_wide <- reshaped_data %>%
+  pivot_wider(names_from = group, values_from = total_count) 
+
+# Perform test
+#wilcox.test(reshaped_data_wide$DCIS, reshaped_data_wide$IDC, paired = TRUE)
+
+```
+
+## Gains and losses
+
+```{r}
+
+# Define a new column for Loss/Gain/Neutral
+combined_all$gain_loss <- ifelse(nchar(combined_all$REF) > nchar(combined_all$ALT), "Loss", ifelse(nchar(combined_all$ALT) > nchar(combined_all$REF), "Gain", "Neutral"))
+
+# Summarize mutation-specific counts and calculate correct percentages
+gain_loss_summary_all <- combined_all %>%
+  group_by(gain_loss) %>%
+  summarise(count = n(), .groups = "drop") %>%  
+  mutate(percentage = (count / total_mutations) * 100)  
+
+# Summarize mutation-specific counts and calculate correct percentages
+gain_loss_summary <- combined_all %>%
+  group_by(gain_loss, type) %>%
+  summarise(count = n(), .groups = "drop") %>%  
+  left_join(mutation_summary_total, by = "type") %>% 
+  mutate(percentage = (count / total_count) * 100)  
+
+# Only show gain and loss information
+gain_loss_summary_filtered <- gain_loss_summary[gain_loss_summary$gain_loss %in% c('Gain', 'Loss'), ]
+
+# Plot gain loss information for each type
+ggplot(gain_loss_summary_filtered, aes(x = gain_loss, y = percentage, fill = percentage)) + 
+  geom_bar(stat = "identity", width = 0.7) +  
+  labs(
+    fill = "Percentage", 
+    title = "Distribution of Gain/Loss Mutations", 
+    x = ' '
+  ) +
+  scale_fill_gradient(low = "#000004FF", high = "#4DAF4A") + 
+  theme_minimal() + 
+  theme(legend.position = "none") +  
+  facet_wrap(~ type) 
+
+```
+
+# Maftools
+
+## Create MAF file
+
+### All mutations
+
+```{r}
+
+# Obtain list with all patient names
+all_patients_names <- c(patients_only_dcis, patients_only_idc, synchronous_patients)
+
+# All sample names
+all_samples <- c(
+  "DCIS_0169", "DCIS_0193", "DCIS_0232", "DCIS_0332", "DCIS_0355", "DCIS_0455", "DCIS_0648",
+  "DCIS_7363", "DCIS_7379", "DCIS_7386", "DCIS_7389", "DCIS_7394", "DCIS_7402", "DCIS_7408",
+  "DCIS_7416", "DCIS_7419", "DCIS_7420", "IDC_0169", "IDC_0193", "IDC_0198", "IDC_0332",
+  "IDC_0355", "IDC_0375", "IDC_0387", "IDC_0443", "IDC_0445", "IDC_0493", "IDC_0496",
+  "IDC_0537", "IDC_0553", "IDC_0711", "IDC_7402", "IDC_7419")
+
+# Make location numeric
+combined_all$Location <- as.numeric(combined_all$Location)
+
+# Create maf file
+maf <- df2maf(combined_all, ref_genome = "hg38", 
+       col_chrom = 'Chrom', 
+       col_sample_identifier = 'sample',
+       col_pos = 'Location', 
+       col_ref = 'REF', 
+       col_alt = 'ALT', 
+       col_consequence = 'mutation_type', 
+       col_gene = 'Gene')
+
+# See which patients have no mutations
+mutated_patients <- unique(maf$Tumor_Sample_Barcode)
+patients_without_mutations <- setdiff(all_samples, mutated_patients)
+
+# Create an empty data frame with all columns
+dummy_mutations <- maf[0:length(patients_without_mutations), ]  
+dummy_mutations <- dummy_mutations %>% mutate_all(~ NA)
+
+# Create the dummy mutations
+dummy_mutations <- tibble::tibble(
+  Hugo_Symbol = "No_Mutation",
+  NCBI_Build = "NA",
+  Chromosome = "NA",
+  Start_Position = 0,
+  End_Position = 0,
+  Variant_Classification = "No_Mutation",
+  Variant_Type = "No_Mutation",
+  Reference_Allele = "NA",
+  Tumor_Seq_Allele2 = "NA",
+  Tumor_Sample_Barcode = patients_without_mutations,
+  Consequence = "No_Mutation",
+  FILTER = "NA",
+  Position_1based = 0,
+  ID = "NA",
+  QUAL = "NA",
+  INFO = "NA",
+  FORMAT = "NA",
+  PatientID = substr(patients_without_mutations, nchar(patients_without_mutations) - 3, nchar(patients_without_mutations)),
+  group = "No_Mutation",
+  Sample_normal = "NA",
+  GT_normal = "NA",
+  AD_normal = 0,
+  AF_normal = 0,
+  DP_normal = 0,
+  F1R2_normal = 0,
+  F2R1_normal = 0,
+  FAD_normal = 0,
+  SB_normal = 0,
+  Sample_tumor = "NA",
+  GT = "NA",
+  AD = 0,
+  AF = 0,
+  DP = 0,
+  F1R2 = 0,
+  F2R1 = 0,
+  FAD = 0,
+  SB = 0,
+  number_normal = 0,
+  number_mutated = 0,
+  Total = 0,
+  Ratio_mut = 0,
+  mutation = "No_Mutation",
+  final_mut = "No_Mutation",
+  type = "No_Mutation",
+  gain_loss = "NA",
+  Ref_Length = 0,
+  Alt_Length = 0,
+  Inframe = 0
+)
+
+# Merge dummy file with maf file
+maf_selected <- rbind(maf, dummy_mutations)
+
+# Read maf file
+maf_data <- read.maf(maf = maf_selected)
+
+```
+
+### BRCA genes
+
+```{r}
+
+# Create a df of all selected breast cancer genes
+combined_all_brca <- combined_all[combined_all$Gene %in% combined_genes, ]
+
+# Count the number of mutations per patient per group
+mutation_counts_groups <- combined_all_brca %>%
+  group_by(PatientID, type) %>%
+  summarise(mutation_count = n(), .groups = "drop")
+
+# Create maf file
+maf_brca <- df2maf(combined_all_brca, ref_genome = "hg38", 
+       col_chrom = 'Chrom', 
+       col_sample_identifier = 'sample',
+       col_pos = 'Location', 
+       col_ref = 'REF', 
+       col_alt = 'ALT', 
+       col_consequence = 'mutation_type', 
+       col_gene = 'Gene')
+
+# See which patients have no mutations in BRCA related genes
+mutated_patients_brca <- unique(maf_brca$Tumor_Sample_Barcode)
+patients_without_mutations_brca <- setdiff(all_samples, mutated_patients_brca)
+
+# Create an empty data frame with all columns
+dummy_mutations_brca <- maf[0:length(patients_without_mutations_brca), ]  
+dummy_mutations_brca <- dummy_mutations_brca %>% mutate_all(~ NA)
+
+# Create the dummy mutations
+dummy_mutations_brca <- tibble::tibble(
+  Hugo_Symbol = "No_Mutation",
+  NCBI_Build = "NA",
+  Chromosome = "NA",
+  Start_Position = 0,
+  End_Position = 0,
+  Variant_Classification = "No_Mutation",
+  Variant_Type = "No_Mutation",
+  Reference_Allele = "NA",
+  Tumor_Seq_Allele2 = "NA",
+  Tumor_Sample_Barcode = patients_without_mutations_brca,
+  Consequence = "No_Mutation",
+  FILTER = "NA",
+  Position_1based = 0,
+  ID = "NA",
+  QUAL = "NA",
+  INFO = "NA",
+  FORMAT = "NA",
+  PatientID = substr(patients_without_mutations_brca, nchar(patients_without_mutations_brca) - 3, nchar(patients_without_mutations_brca)),
+  group = "No_Mutation",
+  Sample_normal = "NA",
+  GT_normal = "NA",
+  AD_normal = 0,
+  AF_normal = 0,
+  DP_normal = 0,
+  F1R2_normal = 0,
+  F2R1_normal = 0,
+  FAD_normal = 0,
+  SB_normal = 0,
+  Sample_tumor = "NA",
+  GT = "NA",
+  AD = 0,
+  AF = 0,
+  DP = 0,
+  F1R2 = 0,
+  F2R1 = 0,
+  FAD = 0,
+  SB = 0,
+  number_normal = 0,
+  number_mutated = 0,
+  Total = 0,
+  Ratio_mut = 0,
+  mutation = "No_Mutation",
+  final_mut = "No_Mutation",
+  type = "No_Mutation",
+  gain_loss = "NA",
+  Ref_Length = 0,
+  Alt_Length = 0,
+  Inframe = 0
+)
+
+# Merge dummy file with maf file
+maf_selected_brca <- rbind(maf_brca, dummy_mutations_brca)
+
+# Read maf file
+maf_data_brca <- read.maf(maf = maf_selected_brca)
+
+
+```
+
+# Test between type per gene
+
+```{r}
+
+# Initialize a results data frame
+wilcox_results <- data.frame(
+  Gene = character(),
+  W = numeric(),
+  p_value = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Get the list of genes
+genes <- unique(combined_all_brca$Gene)
+
+# Loop through each gene
+for (g in genes) {
+  # Filter for the gene
+  gene_data <- combined_all_brca %>% filter(Gene == g)
+  
+  # Count mutations per patient per type for this gene
+  mutation_counts <- gene_data %>%
+    group_by(PatientID, type) %>%
+    summarise(mutation_count = n(), .groups = "drop")
+  
+  # Get DCIS and IDC counts
+  dcis_counts <- mutation_counts %>% filter(type == "pure DCIS (n=7)") %>% pull(mutation_count)
+  idc_counts  <- mutation_counts %>% filter(type == "pure IDC (n=6)") %>% pull(mutation_count)
+  
+  # Check if both groups have data (avoid errors)
+  if (length(dcis_counts) > 0 & length(idc_counts) > 0) {
+    test <- wilcox.test(dcis_counts, idc_counts)
+    
+    # Store results
+    wilcox_results <- rbind(wilcox_results, data.frame(
+      Gene = g,
+      W = test$statistic,
+      p_value = test$p.value
+    ))
+  }
+}
+
+# Optional: Adjust p-values for multiple testing (FDR correction)
+#wilcox_results$adj_p_value <- p.adjust(wilcox_results$p_value, method = "fdr")
+
+# View significant results
+#wilcox_results %>% filter(adj_p_value < 0.05)
+
+```
+
+# Mutation plots
+
+## Oncoplot all genes
+
+```{r}
+
+# Get gene summary
+gene_summary <- getGeneSummary(maf_data)
+
+# Add clinical DCIS or IDC information
+maf_data@clinical.data$Group <- substr(maf_data@clinical.data$Tumor_Sample_Barcode, 1, 3)
+maf_data@clinical.data$Group <- dplyr::recode(maf_data@clinical.data$Group, "DCI" = "DCIS")
+
+# Get patient numbers
+maf_data@clinical.data$Patient <- substr(maf_data@clinical.data$Tumor_Sample_Barcode, nchar(maf_data@clinical.data$Tumor_Sample_Barcode) - 3, nchar(maf_data@clinical.data$Tumor_Sample_Barcode))
+
+# Add clinical 'type' based on patient IDs
+maf_data@clinical.data <- maf_data@clinical.data %>%
+  mutate(
+    Condition = case_when(
+      Patient %in% synchronous_patients ~ "DCIS & IDC (n=20)",   
+      Patient %in% patients_only_idc ~ "pure IDC (n=6)",          
+      Patient %in% patients_only_dcis ~ "pure DCIS (n=7)",        
+      TRUE ~ "Unknown"                                
+    )
+  )
+
+# Define custom colors for clinical features 
+type_colors <- histology_colors
+group_colors <- histology_colors_simple
+
+# Define colors for each patient name
+patient_names <- unique(maf_data@clinical.data$Patient)  
+patient_colors <- setNames(colorRampPalette(brewer.pal(9, "Set1"))(length(patient_names)), patient_names)
+
+# Set the order for 'Group'
+maf_data@clinical.data$Group <- factor(maf_data@clinical.data$Group, levels = c("DCIS", "IDC"))
+
+# Name it sample
+maf_data@clinical.data$Sample <- maf_data@clinical.data$Group
+
+# Combine the color vectors into a list
+annotation_colors <- list(Patient = patient_colors, Group = group_colors, Condition = type_colors, Sample = group_colors)
+
+
+# Extract clinical data
+clin <- maf_data@clinical.data
+
+# Ensure patient and Type are characters (not factors)
+clin$Patient <- as.character(clin$Patient)
+clin$Condition <- as.character(clin$Condition)
+
+# Sort by Type then patient
+sorted_clin <- clin[order(clin$Condition, clin$Patient), ]
+
+# Get the Tumor_Sample_Barcode in desired order
+sample_order <- sorted_clin$Tumor_Sample_Barcode
+
+# Change colors
+vc_cols = RColorBrewer::brewer.pal(n = 8, name = 'Paired')
+names(vc_cols) = c(
+  'Frame_Shift_Del',
+  'Missense_Mutation',
+  'Nonsense_Mutation',
+  'Multi_Hit',
+  'Frame_Shift_Ins',
+  'In_Frame_Ins',
+  'Splice_Site',
+  'In_Frame_Del'
+)
+
+# Extract Variant Allele Frequency (AF) for BRCA dataset
+genes_af = maf_data@data[, .(AF = mean(AF, na.rm = TRUE)), by = Hugo_Symbol]
+
+# Determine order
+maf_data@clinical.data$Condition <- factor(
+  maf_data@clinical.data$Condition,
+  levels = c("pure DCIS (n=7)", "DCIS & IDC (n=20)", "pure IDC (n=6)")
+)
+
+# 2. Extract sample order based on that ordering
+sample_order <- maf_data@clinical.data %>%
+  arrange(Condition, Patient) %>%  # Will now follow the factor levels
+  pull(Tumor_Sample_Barcode)  # or the correct column for sample IDs
+
+
+# Oncoplot with manual sample order
+oncoplot(   
+  maf = maf_data,    
+  top = 30,     
+  colors = vc_cols,
+  clinicalFeatures = c('Condition', 'Patient', 'Sample'),    
+  annotationColor = annotation_colors,   
+  removeNonMutated = FALSE, 
+  sortByAnnotation = FALSE,  
+  sampleOrder = sample_order,
+  titleText = "Oncoplot of Top 30 Mutated Genes",    
+  fontSize = 0.4,     
+  legendFontSize = 1,    
+  annotationFontSize = 0.8,
+  draw_titv = TRUE,
+  leftBarData = genes_af,  
+  leftBarLims = c(0, 1)  
+)
+
+
+```
+
+## Oncoplot BRCA genes
+
+```{r}
+
+# Get gene summary
+gene_summary_brca <- getGeneSummary(maf_data_brca)
+
+# Add clinical DCIS or IDC information
+maf_data_brca@clinical.data$Group <- substr(maf_data_brca@clinical.data$Tumor_Sample_Barcode, 1, 3)
+maf_data_brca@clinical.data$Group <- dplyr::recode(maf_data_brca@clinical.data$Group, "DCI" = "DCIS")
+
+# Name it sample
+maf_data_brca@clinical.data$Sample <- maf_data_brca@clinical.data$Group
+
+# Get patient numbers
+maf_data_brca@clinical.data$Patient <- substr(maf_data_brca@clinical.data$Tumor_Sample_Barcode, nchar(maf_data_brca@clinical.data$Tumor_Sample_Barcode) - 3, nchar(maf_data_brca@clinical.data$Tumor_Sample_Barcode))
+
+# Add clinical 'type' based on patient IDs
+maf_data_brca@clinical.data <- maf_data_brca@clinical.data %>%
+  mutate(
+    Condition = case_when(
+      Patient %in% synchronous_patients ~ "DCIS & IDC (n=20)",   
+      Patient %in% patients_only_idc ~ "pure IDC (n=6)",          
+      Patient %in% patients_only_dcis ~ "pure DCIS (n=7)",        
+      TRUE ~ "Unknown"                                
+    )
+  )
+
+# Define custom colors for clinical features 
+type_colors <- histology_colors
+group_colors <- histology_colors_simple
+
+# Define colors for each patient name
+patient_names <- unique(maf_data_brca@clinical.data$Patient)  
+patient_colors <- setNames(colorRampPalette(brewer.pal(9, "Set1"))(length(patient_names)), patient_names)
+
+
+
+# Define annotation colors correctly
+annotation_colors <- list(Condition = type_colors, Group = group_colors, Patient = patient_colors, Sample = group_colors)
+
+# Get the sample IDs where Group is 'IDC'
+idc_samples <- maf_data_brca@clinical.data$Tumor_Sample_Barcode[maf_data@clinical.data$Group == 'IDC']
+
+# Extract clinical data
+clin <- maf_data_brca@clinical.data
+
+# Ensure patient and Type are characters (not factors)
+clin$Patient <- as.character(clin$Patient)
+clin$Condition <- as.character(clin$Condition)
+
+# Sort by Type then patient
+sorted_clin <- clin[order(clin$Condition, clin$Patient), ]
+
+# Get the Tumor_Sample_Barcode in desired order
+sample_order <- sorted_clin$Tumor_Sample_Barcode
+
+# Change colors
+vc_cols = RColorBrewer::brewer.pal(n = 8, name = 'Paired')
+names(vc_cols) = c(
+  'Frame_Shift_Del',
+  'Missense_Mutation',
+  'Nonsense_Mutation',
+  'Multi_Hit',
+  'Frame_Shift_Ins',
+  'In_Frame_Ins',
+  'Splice_Site',
+  'In_Frame_Del'
+)
+
+# Extract Variant Allele Frequency (AF) for BRCA dataset
+brca_genes_af = maf_data_brca@data[, .(AF = mean(AF, na.rm = TRUE)), by = Hugo_Symbol]
+head(brca_genes_af)
+
+
+# Determine order
+maf_data_brca@clinical.data$Condition <- factor(
+  maf_data_brca@clinical.data$Condition,
+  levels = c("pure DCIS (n=7)", "DCIS & IDC (n=20)", "pure IDC (n=6)")
+)
+
+# 2. Extract sample order based on that ordering
+sample_order <- maf_data_brca@clinical.data %>%
+  arrange(Condition, Patient) %>%  # Will now follow the factor levels
+  pull(Tumor_Sample_Barcode)  # or the correct column for sample IDs
+
+# Oncoplot with manual sample order
+oncoplot(
+  maf = maf_data_brca,
+  top = 30,
+  colors = vc_cols,
+  clinicalFeatures = c('Condition', 'Patient', 'Sample'),
+  annotationColor = annotation_colors,
+  removeNonMutated = FALSE,
+  sortByAnnotation = FALSE,
+  sampleOrder = sample_order,  # Uses manually sorted order
+  titleText = "Oncoplot of Top 30 Mutated Selected Breast Cancer Genes",
+  fontSize = 0.4,
+  legendFontSize = 1,
+  annotationFontSize = 0.8,
+  leftBarData = brca_genes_af,
+  leftBarLims = c(0, 1)
+)
+
+```
+
+## Co-occurrence plot
+
+```{r}
+# Create a MAF object from your dataframe
+maf_object <- read.maf(maf = maf, 
+                       clinicalData = NULL, 
+                       vc_nonSyn = c("Missense_Mutation")) 
+
+# Run the interaction analysis with custom colors
+somaticInteractions(maf = maf_object, top = 25, colPal = 'Oranges',
+                      fontSize = 0.6)
+
+```
+
+## Maf summary plot
+
+```{r}
+# Plot gene summary all genes
+plotmafSummary(maf_data) 
+```
+
+## More information
+
+```{r}
+
+#Shows sample summary
+getSampleSummary(maf_data)
+
+#Shows gene summar
+getGeneSummary(maf_data)
+
+# Make maf gene barplot
+mafbarplot(maf = maf_data)
+
+# Plot gene
+plotProtein(gene = "TP53")
+
+
+```
+
+## Transition/transversion plot
+
+```{r}
+# Get colours transitions and transversions
+viridis_colors = viridis(6)
+color_vector <- c(
+  "C>T" = viridis_colors[3],
+  "C>A" = viridis_colors[6],
+  "C>G" = viridis_colors[1],
+  "T>C" = viridis_colors[4],
+  "T>G" = viridis_colors[5],
+  "T>A" = viridis_colors[2]
+)
+
+# Plot transitions and transversions 
+laml.titv = titv(maf = maf_data, plot = FALSE, useSyn = TRUE)
+plotTiTv(res = laml.titv, 
+         color = color_vector)
+
+# Compute transition and transversion summary
+titv_res <- titv(maf = maf_data, plot = FALSE)  
+total_ct <- sum(titv_res$raw.counts$`C>T`)
+total_mutations1 <- sum(titv_res$raw.counts[, -1]) 
+
+# Proportion of C>T transitions
+ct_proportion <- total_ct / total_mutations1
+
+```
+
+## Lollipop plot
+
+```{r}
+
+# Create a data frame with Mutation and Genomic_Position
+PIK3CA_hotspot_df <- data.frame(
+  Mutation = c(
+    "K111E", "K111N", "K111N", "N345K", "N345K", "N345I", "N345T", "N345H",
+    "E365K", "E365Q", "E365V", "E453G", "E453K", "E453Q", "E453V",
+    "E542K", "E542Q", "E542V", "E542G", "E542A",
+    "E545A", "E545K", "E545G", "E545Q", "E545D", "E545D",
+    "Q546K", "Q546R", "Q546P", "Q546E", "Q546H", "Q546H", "Q546L",
+    "E722K", "E722D", "E726K",
+    "H1047R", "H1047L", "H1047Q", "H1047Q", "H1047Y", "H1047N"
+  ),
+  Genomic_Position = c(
+    "3:179199156:G", "3:179199158:C", "3:179199158:T", "3:179203765:A", "3:179203765:G",
+    "3:179203764:T", "3:179203764:C", "3:179203763:C", "3:179204536:A", "3:179204536:C",
+    "3:179204537:T", "3:179210292:G", "3:179210291:A", "3:179210291:C", "3:179210292:T",
+    "3:179218294:A", "3:179218294:C", "3:179218295:T", "3:179218295:G", "3:179218295:C",
+    "3:179218304:C", "3:179218303:A", "3:179218304:G", "3:179218303:C", "3:179218305:C", "3:179218305:T",
+    "3:179218306:A", "3:179218307:G", "3:179218307:C", "3:179218306:G", "3:179218308:C", "3:179218308:T", "3:179218307:T",
+    "3:179221134:A", "3:179221136:C", "3:179221146:A",
+    "3:179234297:G", "3:179234297:T", "3:179234298:G", "3:179234298:A", "3:179234296:T", "3:179234296:A"
+  ),
+  stringsAsFactors = FALSE
+)
+
+# TP53 hotspot mutations data frame
+tp53_hotspot_df <- data.frame(
+  Mutation = c(
+    "R175H", "R175G", "R175L", "R175C", "R175P", "R175S", "R175R", "R175R", "R175R",
+    "R273C", "R273H", "R273L", "R273S", "R273P", "R273G", "R273R", "R273R", "R273R",
+    "R110P", "R110L", "R110H",
+    "H168R", "H168L", "H168P", "H168Q", "H168Q", "H168D", "H168Y", "H168N", "H168H",
+    "V173L", "V173L", "V173G", "V173M",
+    "C176F", "C176Y", "C176W", "C176S", "C176S", "C176R", "C176G",
+    "I195T", "I195N", "I195F", "I195S",
+    "Y220C", "Y220H", "Y220S", "Y220N",
+    "Y234C", "Y234N", "Y234H",
+    "G245S", "G245D", "G245V", "G245C", "G245R", "G245A",
+    "R248Q", "R248W", "R248L", "R248P", "R248G",
+    "R249S", "R249S", "R249W", "R249T", "R249G", "R249M",
+    "R248L",
+    "R273H", "R273L", "R273C", "R273P", "R273S", "R273G",
+    "R280T", "R280K", "R280I", "R280G", "R280S", "R280S"
+  ),
+  Genomic_Position = c(
+    "17:7675088:T", "17:7675089:C", "17:7675088:A", "17:7675089:A", "17:7675088:G", "17:7675089:T", "17:7675087:T", "17:7675087:C", "17:7675087:A",
+    "17:7673803:A", "17:7673802:T", "17:7673802:A", "17:7673803:T", "17:7673802:G", "17:7673803:C", "17:7673801:T", "17:7673801:G", "17:7673801:C",
+    "17:7676040:G", "17:7676040:A", "17:7676040:T",
+    "17:7675109:C", "17:7675109:A", "17:7675109:G", "17:7675108:C", "17:7675108:T", "17:7675110:C", "17:7675110:A", "17:7675110:T", "17:7675108:A",
+    "17:7675095:A", "17:7675095:G", "17:7675094:C", "17:7675095:T",
+    "17:7675085:A", "17:7675085:T", "17:7675084:C", "17:7675086:T", "17:7675085:G", "17:7675086:G", "17:7675086:C",
+    "17:7674947:G", "17:7674947:T", "17:7674948:A", "17:7674947:C",
+    "17:7674872:C", "17:7674873:G", "17:7674872:G", "17:7674873:T",
+    "17:7674262:C", "17:7674263:T", "17:7674263:G",
+    "17:7674230:T", "17:7674229:T", "17:7674229:A", "17:7674230:A", "17:7674230:G", "17:7674229:G",
+    "17:7674220:T", "17:7674221:A", "17:7674220:A", "17:7674220:G", "17:7674221:C",
+    "17:7674216:A", "17:7674216:G", "17:7674218:A", "17:7674217:G", "17:7674218:C", "17:7674217:A",
+    "17:7674220:A",
+    "17:7673802:T", "17:7673802:A", "17:7673803:A", "17:7673802:G", "17:7673803:T", "17:7673803:C",
+    "17:7673781:G", "17:7673781:T", "17:7673781:A", "17:7673782:C", "17:7673780:A", "17:7673780:G"
+  ),
+  stringsAsFactors = FALSE
+)
+
+# Split cell into chrom, location and alt
+tp53_hotspot_df <- tp53_hotspot_df %>%
+  separate(Genomic_Position, into = c("Chrom", "Location", "ALT"), sep = ":", convert = TRUE)
+PIK3CA_hotspot_df <- PIK3CA_hotspot_df %>%
+  separate(Genomic_Position, into = c("Chrom", "Location", "ALT"), sep = ":", convert = TRUE)
+
+# Convert both Chrom and Location to same types in both data frames
+tp53_hotspot_df <- tp53_hotspot_df %>%
+  mutate(
+    Chrom = as.character(Chrom),
+    Location = as.numeric(Location)
+  )
+PIK3CA_hotspot_df <- PIK3CA_hotspot_df %>%
+  mutate(
+    Chrom = as.character(Chrom),
+    Location = as.numeric(Location)
+  )
+
+# Make sure chromosome columns match in type/format (e.g. character)
+maf_data_tp53 <- maf_data@data
+maf_data_tp53$Chromosome <- as.character(maf_data_tp53$Chromosome)
+tp53_hotspot_df$Chrom <- as.character(tp53_hotspot_df$Chrom)
+
+# Filter maf_data for hotspot mutations by matching Chromosome, Start_Position, and ALT allele
+hotspot_mutations <- subset(maf_data_tp53,
+  Chromosome %in% tp53_hotspot_df$Chrom &
+  Start_Position %in% tp53_hotspot_df$Location &
+  Tumor_Seq_Allele2 %in% tp53_hotspot_df$ALT
+)
+
+# If you want to be more precise (match triplets), do a join:
+hotspot_mutations <- maf_data_tp53 %>%
+  inner_join(tp53_hotspot_df,
+             by = c("Chromosome" = "Chrom",
+                    "Start_Position" = "Location",
+                    "Tumor_Seq_Allele2" = "ALT"))
+
+# Create hotspot maf file
+maf_hotspot <- read.maf(maf = hotspot_mutations)
+
+# Make lollipop plot
+lollipopPlot(
+  maf = maf_hotspot,
+  gene = "TP53",
+  AACol = "Mutation",
+  showMutationRate = TRUE,
+  labelPos = "all",
+  labPosAngle = 90,       # Rotate labels 90 degrees
+  labPosSize = 0.7        # Smaller text size for labels
+)
+
+# Make lollipop plot
+lollipopPlot(
+  maf = maf_hotspot,
+  gene = "TP53",
+  AACol = "Mutation",
+  showMutationRate = TRUE,
+  showDomainLabel = FALSE,
+  labelPos = "all",
+  labPosAngle = 90,       # Rotate labels 90 degrees
+  labPosSize = 0.7,
+  titleSize = c(1.2, 1)
+)
+
+
+
+
+# Make sure chromosome columns match in type/format (e.g. character)
+maf_data_pik3ca <- maf_data@data
+maf_data_pik3ca$Chromosome <- as.character(maf_data_pik3ca$Chromosome)
+PIK3CA_hotspot_df$Chrom <- as.character(PIK3CA_hotspot_df$Chrom)
+
+# Filter maf_data for hotspot mutations by matching Chromosome, Start_Position, and ALT allele
+hotspot_mutations_pik3ca <- subset(maf_data_pik3ca,
+  Chromosome %in% PIK3CA_hotspot_df$Chrom &
+  Start_Position %in% PIK3CA_hotspot_df$Location &
+  Tumor_Seq_Allele2 %in% PIK3CA_hotspot_df$ALT
+)
+
+# If you want to be more precise (match triplets), do a join:
+hotspot_mutations_pik3ca <- maf_data_pik3ca %>%
+  inner_join(PIK3CA_hotspot_df,
+             by = c("Chromosome" = "Chrom",
+                    "Start_Position" = "Location",
+                    "Tumor_Seq_Allele2" = "ALT"))
+
+# Create hotspot maf file
+setkey(hotspot_mutations_pik3ca, NULL)
+maf_hotspot_pik3ca <- read.maf(maf = hotspot_mutations_pik3ca)
+
+
+# Pick a palette with at least 6 distinct colors
+
+
+# Pick a palette with at least 6 distinct colors
+custom_domain_colors <- setNames(brewer.pal(n = 6, name = "Dark2"), 
+                          c("P13Kc_1A_alpha", "P13Kc", "P13Ka_1", 
+        
+                    "C2_P13K_class_1_alpha", "P13K_rbd", "P13K_p85B"))
+
+# Make lollipop plot
+lollipopPlot(
+  maf = maf_hotspot_pik3ca,
+  gene = "PIK3CA",
+  AACol = "Mutation",
+  showMutationRate = TRUE,
+  showDomainLabel = FALSE,
+  labelPos = "all",
+  labPosAngle = 90,       # Rotate labels 90 degrees
+  labPosSize = 0.7,
+  titleSize = c(1.2, 1))
+
+```
+
+## Rainfall plot
+
+```{r}
+# Select which patient you want to plot
+rainfallPlot(maf = maf_data, tsb = 'DCIS_0169', 
+               color = color_vector, detectChangePoints = TRUE, pointSize = 0.8)
+
+```
+
+# Extra plots
+
+## Average number of mutations per chromosome
+
+```{r}
+# Count mutations per patient and chromosome
+mutation_summary <- combined_all %>%
+  group_by(Chrom, sample, type) %>%
+  summarize(mutation_count = n()) %>%
+  ungroup()
+
+# Calculate the average number of mutations per chromosome across patients
+avg_mutation_per_chromosome <- mutation_summary %>%
+  group_by(Chrom, type) %>%
+  summarize(
+    avg_mutations = mean(mutation_count),
+    sd_mutations = sd(mutation_count),  
+    se_mutations = sd_mutations / sqrt(n()) 
+  )
+
+# Set the factor levels for the chromosome column to ensure the order is correct
+avg_mutation_per_chromosome$Chrom <- factor(avg_mutation_per_chromosome$Chrom, levels = c(as.character(1:22), "X"))
+
+# Assuming avg_mutation_per_chromosome is your dataframe with the necessary columns
+ggplot(avg_mutation_per_chromosome, aes(x = Chrom, y = avg_mutations)) + 
+  # Bar plot without fill color
+  geom_bar(stat = "identity", fill = NA, color = "black") + 
+  
+  # Add error bars
+  geom_errorbar(
+    aes(ymin = avg_mutations - se_mutations, ymax = avg_mutations + se_mutations),
+    width = 0.2, 
+    color = "black"
+  ) + 
+  
+  # Scatter points for each chromosome
+  geom_point(aes(color = avg_mutations), size = 3) +  
+  # Apply a color scale to the scatter points
+  scale_color_viridis_c(option = "D") + 
+  
+  # Minimal theme with no legend for fill
+  theme_minimal() + 
+  theme(legend.position = 'none') +
+  
+  # Labels
+  labs(
+    title = "Average number of mutations per chromosome",
+    x = "Chromosome",
+    y = "Average # of mutations",
+    fill = "Avg Mutations"  
+  ) + 
+  facet_wrap(~ type, ncol = 1)
+
+
+```
+
+## TMB plot
+
+```{r}
+# Calculate TMB
+tmb <- tmb(maf = maf_data)
+clinical_data <- getClinicalData(maf_data)
+tmb <- merge(tmb, clinical_data, by = "Tumor_Sample_Barcode")
+
+# Barplot TMB
+barplot(
+  height = tmb$total_perMB, 
+  names.arg = tmb$Tumor_Sample_Barcode, 
+  las = 2,
+  main = "Tumor mutational burden per sample", 
+  cex.names = 0.4  
+)
+
+# Create a new tumor type column based on the Tumor_Sample_Barcode
+tmb$tumor_type <- ifelse(grepl("IDC", tmb$Tumor_Sample_Barcode), "pure IDC (n=6)", "pure DCIS (n=7)")
+
+# Box plot of TMB distribution by tumor type
+boxplot(
+  total_perMB ~ Condition, 
+  data = tmb, 
+  main = "TMB distribution by tumor type", 
+  ylab = "Tumor Mutational Burden"
+)
+
+# TMB boxplot per type
+ggplot(tmb, aes(x = Condition, y = total_perMB, fill = Condition)) +
+  geom_boxplot(alpha = 0.6, outlier.shape = NA) + 
+  geom_jitter(shape = 21, size = 2, width = 0.2) + 
+  scale_fill_manual(values = histology_colors)+  
+  labs(title = "Tumor Mutational Burden (TMB) by Clinical Type", 
+       x = "Clinical Type", 
+       y = "TMB (Mutations per MB)") +
+  theme_minimal()
+
+# Sort patients by TMB
+tmb_df <- tmb %>% arrange(total_perMB)
+
+# Calculate median value
+median_tmb <- median(tmb_df$total_perMB, na.rm = TRUE)
+
+# Add a 'Condition' column based on patient group
+tmb_df <- tmb_df %>%
+  mutate(Condition = case_when(
+    Patient %in% synchronous_patients ~ "DCIS & IDC (n=20)",
+    Patient %in% patients_only_idc ~ "pure IDC (n=6)",
+    Patient %in% patients_only_dcis ~ "pure DCIS (n=7)",
+    TRUE ~ "Unknown" 
+  ))
+
+# Create the scatter plot with log scale on y-axis and median annotation
+ggplot(tmb_df, aes(x = reorder(Tumor_Sample_Barcode, total_perMB), 
+                   y = total_perMB, 
+                   fill = Condition)) + 
+  geom_point(shape = 21, size = 3, alpha = 1, color = "black") +  
+  geom_hline(yintercept = median_tmb, 
+             linetype = "dashed", color = "black", linewidth = 0.5) + 
+  scale_y_log10() + 
+  labs(title = "Tumor Mutational Burden (TMB)", 
+       x = "Patient ID", 
+       y = "TMB", 
+       fill = "Condition") + 
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 90), 
+        legend.position = "top") + 
+  annotate("text", x = 1, y = 0.1, 
+           label = paste("Median TMB: ", round(median_tmb, 2)), 
+           size = 3, hjust = -0, vjust = -15, color = "black")  + 
+  scale_fill_manual(values = histology_colors
+  )
+
+# Obtain TMB df
+TMB <- as.data.frame(tmb)
+
+# Calculate the median per condition
+tmb_df_median <- tmb_df %>%
+  group_by(Condition) %>%
+  summarize(median = median(total_perMB))
+```
+
+### Save TMB as df
+
+```{r}
+
+# Set cwd only for in this chunck
+setwd("/Users/sannepetersen/Documents/Bioinformatics and systems biology/NKI Bioinformatics/Bestanden")
+
+# Save the df
+write.table(TMB, "TMB.txt", sep = "\t", quote = FALSE, row.names = FALSE)
+
+```
+
+## Stacked bar plot transitions/transversions
+
+```{r}
+
+# Get the transition and transversion summary
+titv_res <- titv(maf = maf_data, plot = FALSE)  
+
+# Convert the data to a long format 
+titv_long <- titv_res$raw.counts %>%
+  pivot_longer(cols = -Tumor_Sample_Barcode, names_to = "Mutation_Type", values_to = "Count")
+
+# Merge with clinical data 
+titv_long <- titv_long %>%
+  left_join(maf_data@clinical.data, by = c("Tumor_Sample_Barcode" = "Tumor_Sample_Barcode")) 
+
+# Make plot of base substitutions
+ggplot(titv_long, aes(x = Tumor_Sample_Barcode, y = Count, fill = Mutation_Type)) +
+  geom_bar(stat = "identity", position = "fill") + 
+  scale_fill_viridis_d(option = 'D') + 
+  labs(title = "Base Substitution Distribution",
+       x = "Sample",
+       y = "Proportion of Mutations",
+       fill = "Mutation Type") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))  
+
+```
+
+## Comparing mutation profiles
+
+```{r}
+
+# Obtain df for only DCIS and IDC patients
+combined_all_both <- combined_all[combined_all$sample %in% samples_with_both, ]
+
+# See which genes are most mutated
+most_mutated_genes <- combined_all_both %>%
+  group_by(PatientID, Gene, group) %>%               
+  summarise(mutation_count = n(), .groups = "drop") %>%  
+  arrange(PatientID, desc(mutation_count))      
+
+# Get the top 40 most mutated genes for each patient
+top_40_genes_per_patient <- most_mutated_genes %>%
+  group_by(PatientID) %>%
+  slice_max(mutation_count, n = 40, with_ties = FALSE) %>%
+  ungroup()
+
+# Convert data into a binary presence/absence format
+heatmap_data <- top_40_genes_per_patient %>%
+  mutate(present = 1) %>%  
+  pivot_wider(names_from = group, values_from = present, values_fill = list(present = 0))
+
+# Reshape for heatmap plotting
+heatmap_long <- heatmap_data %>%
+  pivot_longer(cols = -c(PatientID, Gene), names_to = "Group", values_to = "Presence")
+
+# Remove mutation count group
+heatmap_long <- heatmap_long[heatmap_long$Group != 'mutation_count', ]
+
+# Plot
+ggplot(heatmap_long, aes(x = Group, y = Gene, fill = as.factor(Presence))) +
+  geom_tile(color = "black") +  # Add grid lines
+  scale_fill_manual(values = c("0" = "white", "1" = "black")) +  
+  facet_wrap(~ PatientID, scales = "free_y") +  
+  theme_minimal() +
+  labs(title = "Top 40 Most Mutated Genes per Patient",
+       x = "Group",
+       y = "Gene",
+       fill = "Mutation Presence") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), axis.text.y = element_text(size = 3))  
+
+```
+
+## Difference in frequency gene mutations between DCIS and IDC
+
+```{r}
+
+# Count number of unique genes per type
+unique_gene_count <- combined_all_brca %>%
+  group_by(type) %>%
+  summarise(unique_genes = n_distinct(Gene))
+
+# Determine colors
+my_colors <- brewer.pal(n = 5, name = "Set1")
+
+# 1. Filter for top 20 most mutated genes
+top_genes_brca <- combined_all_brca %>%
+  count(Gene) %>%
+  arrange(desc(n)) %>%
+  slice_head(n = 50) %>%
+  pull(Gene)
+
+# 2. Subset the data to only include top 20 genes
+top_gene_data <- combined_all_brca %>%
+  filter(Gene %in% top_genes_brca)
+
+# 3. Count number of mutations per gene per type
+gene_counts <- top_gene_data %>%
+  group_by(Gene, type) %>%
+  summarise(count = n(), .groups = "drop")
+
+# 4. Spread data to have one column for DCIS and one for IDC (for mirroring)
+plot_data <- gene_counts %>%
+  tidyr::pivot_wider(names_from = type, values_from = count, values_fill = 0)
+
+# 5. Reshape for ggplot
+plot_data_long <- plot_data %>%
+  tidyr::pivot_longer(cols = c("pure DCIS (n=7)", "pure IDC (n=6)"), names_to = "Type", values_to = "Count") %>%
+  mutate(Count = ifelse(Type == "pure DCIS (n=7)", -Count, Count)) 
+
+# 6. Plot
+ggplot(plot_data_long, aes(x = reorder(Gene, Count), y = Count, fill = Type)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_y_continuous(labels = abs) +  # Show absolute values on x-axis
+  labs(x = "Gene", y = "Number of Mutations", title = "Mutation Frequency in Top 20 Genes: DCIS vs IDC", fill = 'Condition') +
+  scale_fill_manual(values = histology_colors) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 5))  
+
+```
+
+## Difference in frequency gene percentages
+
+```{r}
+
+# Get top 20 genes based on how many unique patients have a mutation
+top_genes_brca <- combined_all_brca %>%
+  distinct(Gene, PatientID) %>%
+  count(Gene, name = "num_patients") %>%
+  arrange(desc(num_patients)) %>%
+  slice_head(n = 50) %>%
+  pull(Gene)
+
+
+# Total patients per group
+total_patients <- combined_all_brca %>%
+  distinct(PatientID, type) %>%
+  count(type, name = "total_patients")
+
+# Count how many patients per gene per group
+gene_patient_percent <- combined_all_brca %>%
+  filter(Gene %in% top_genes_brca) %>%
+  distinct(Gene, PatientID, type) %>%
+  count(Gene, type, name = "num_patients_with_mutation") %>%
+  left_join(total_patients, by = "type") %>%
+  mutate(percentage = 100 * num_patients_with_mutation / total_patients)
+
+# Select DCIS and IDC groups
+gene_patient_percent <- gene_patient_percent[gene_patient_percent$type %in% c('pure DCIS (n=7)', 'pure IDC (n=6)'), ]
+
+# Make the numbers of DCIS negative for visualizations
+gene_patient_percent <- gene_patient_percent %>%
+  mutate(percentage_plot = ifelse(type == "pure DCIS (n=7)", -percentage, percentage))
+
+# Plot
+ggplot(gene_patient_percent, aes(x = reorder(Gene, abs(percentage_plot)), 
+                                 y = percentage_plot, fill = type)) + 
+  geom_bar(stat = "identity") +
+  geom_text(
+    aes(label = paste0(abs(round(percentage_plot, 1)), "%")),
+    hjust = ifelse(gene_patient_percent$percentage_plot < 0, 1.1, -0.1),  
+    size = 1.5
+  ) +
+  coord_flip() +
+  scale_y_continuous(
+    limits = c(-75, 75),
+    labels = abs,
+    name = "% of Patients with Mutation"
+  ) +
+  labs(
+    x = "Gene",
+    title = "Mutation Frequency in Selected Breast Cancer Genes: DCIS vs IDC",
+    fill = 'Condition'
+  ) +
+  scale_fill_manual(values = histology_colors) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 5))
+
+```
+
+## Same but for synchronous DCIS
+
+```{r}
+
+# Obtain synchronous group
+synchronous_group <- combined_all_brca[combined_all_brca$type == 'DCIS & IDC (n=20)', ]
+
+# Get top 20 genes based on how many unique patients have a mutation
+top_genes_brca_synch <- synchronous_group %>%
+  distinct(Gene, PatientID) %>%
+  count(Gene, name = "num_patients") %>%
+  arrange(desc(num_patients)) %>%
+  slice_head(n = 50) %>%
+  pull(Gene)
+
+# Total patients per group
+total_patients_synch <- synchronous_group %>%
+  distinct(PatientID, group) %>%
+  count(group, name = "total_patients")
+
+# Count how many patients per gene per group
+gene_patient_percent_synch <- synchronous_group %>%
+  filter(Gene %in% top_genes_brca_synch) %>%
+  distinct(Gene, PatientID, group) %>%
+  count(Gene, group, name = "num_patients_with_mutation") %>%
+  left_join(total_patients_synch, by = "group") %>%
+  mutate(percentage = 100 * num_patients_with_mutation / total_patients)
+
+# Make DCIS values negative for visualization
+gene_patient_percent_synch <- gene_patient_percent_synch %>%
+  mutate(percentage_plot = ifelse(group == "DCIS", -percentage, percentage))
+
+# Plot
+ggplot(gene_patient_percent_synch, aes(x = reorder(Gene, abs(percentage_plot)), y = percentage_plot, fill = group)) +
+  geom_bar(stat = "identity") +
+  geom_text(
+    aes(label = paste0(abs(round(percentage_plot, 1)), "%")),
+    hjust = ifelse(gene_patient_percent_synch$group == "DCIS", 1.1, -0.1), 
+    size = 1.5
+  ) +
+  coord_flip() +
+  scale_y_continuous(
+    limits = c(-75, 75),
+    labels = abs,
+    name = "% of Patients with Mutation"
+  ) +
+  labs(
+    x = "Gene",
+    title = "Mutation Frequency Synchronous DCIS vs IDC", 
+    fill = 'Condition'
+  ) +
+  scale_fill_manual(values = histology_colors_simple) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 5))
+
+
+
+# Rename levels in 'group' column
+gene_patient_percent_synch$group <- factor(
+  gene_patient_percent_synch$group,
+  levels = c("DCIS", "IDC"),
+  labels = c("pure DCIS (n=7)", "pure IDC (n=9)")
+)
+
+# Now plot
+ggplot(gene_patient_percent_synch, aes(x = reorder(Gene, abs(percentage_plot)), y = percentage_plot, fill = group)) + 
+  geom_bar(stat = "identity") + 
+  geom_text(
+    aes(label = paste0(abs(round(percentage_plot, 1)), "%")),
+    hjust = ifelse(gene_patient_percent_synch$group == "pure DCIS (n=7)", 1.1, -0.1),
+    size = 1.5
+  ) + 
+  coord_flip() + 
+  scale_y_continuous(
+    limits = c(-75, 75),
+    labels = abs,
+    name = "% of Patients with Mutation"
+  ) + 
+  labs(
+    x = "Gene",
+    title = "Mutation Frequency Synchronous DCIS vs IDC", 
+    fill = 'Condition'
+  ) + 
+  scale_fill_manual(values = histology_colors) + 
+  theme_minimal() + 
+  theme(axis.text.y = element_text(size = 5))
+
+```
+
+## Venn diagram
+
+```{r}
+
+# Get distinct Gene-Type combinations
+gene_type_table <- combined_all_brca %>%
+  distinct(Gene, type)
+
+# In total 77 unique genes
+length(unique(gene_type_table$Gene))
+
+# Get lists of genes for DCIS
+genes_dcis <- gene_type_table %>%
+  filter(type == "pure DCIS (n=7)") %>%
+  pull(Gene)
+
+# Get lists of genes for IDC
+genes_idc <- gene_type_table %>%
+  filter(type == "pure IDC (n=6)") %>%
+  pull(Gene)
+
+# Get lists of genes for synchronous DCIS & IDC
+genes_both <- gene_type_table %>%
+  filter(type == "DCIS & IDC (n=20)") %>%
+  pull(Gene)
+
+# Unique to each
+only_in_dcis <- setdiff(genes_dcis, genes_idc)
+only_in_idc <- setdiff(genes_idc, genes_dcis)
+in_both <- intersect(genes_dcis, genes_idc)
+
+
+# Create venn diagram
+venn.plot <- venn.diagram(
+  x = list(DCIS = genes_dcis, IDC = genes_idc),
+  category.names = c("DCIS", "IDC"),
+  filename = NULL,
+  output = TRUE
+)
+
+# Draw the plot in the RStudio Plots window
+grid::grid.newpage()
+grid::grid.draw(venn.plot)
+```
+
+## PCA on all genes
+
+```{r}
+
+# 
+# # 1. Create a binary matrix: 1 if the gene is mutated in the patient, 0 otherwise
+# gene_matrix <- combined_all %>%
+#   distinct(sample, Gene) %>%
+#   mutate(value = 1) %>%
+#   pivot_wider(names_from = Gene, values_from = value, values_fill = list(value = 0))
+# 
+# # 2. Add the 'type' information (DCIS, IDC, etc.)
+# patient_types <- combined_all %>%
+#   distinct(sample, type)
+# 
+# gene_matrix <- gene_matrix %>%
+#   left_join(patient_types, by = "sample")
+# 
+# # 3. Separate the type column from the numeric data
+# gene_data <- gene_matrix[,-c(1,10978)]
+# gene_type <- gene_matrix$type
+# 
+# # 4. Run PCA
+# pca_result <- prcomp(gene_data, center = TRUE, scale. = TRUE)
+# 
+# # 5. Create a data frame for plotting
+# pca_df <- as.data.frame(pca_result$x)
+# pca_df$type <- gene_type
+# 
+# # 6. Plot PCA
+# ggplot(pca_df, aes(x = PC1, y = PC2, color = type)) +
+#   geom_point(size = 2, alpha = 0.8) +
+#   labs(
+#     title = "PCA of Mutation Profiles in Breast Cancer Patients",
+#     x = "Principal Component 1",
+#     y = "Principal Component 2"
+#   ) +
+#   theme_minimal() +
+#   scale_color_brewer(palette = "Set1")
+# 
+# ggplot(pca_df, aes(x = PC1, y = PC2, color = type)) +   
+#   geom_point(size = 2, alpha = 0.8) +   
+#   labs(
+#     title = "PCA of Mutation Profiles in Breast Cancer Patients",
+#     x = "Principal Component 1",
+#     y = "Principal Component 2"
+#   ) +   
+#   theme_minimal() +   
+#   scale_color_brewer(palette = "Set1") +   
+#   xlim(-25, 25) +   # Set limit for x-axis
+#   ylim(-25, 25)     # Set limit for y-axis
+
+
+```
+
+## PCA on BRCA genes
+
+```{r}
+# 
+# 
+# # 1. Create a binary matrix: 1 if the gene is mutated in the patient, 0 otherwise
+# gene_matrix <- combined_all_brca %>%
+#   distinct(sample, Gene) %>%
+#   mutate(value = 1) %>%
+#   pivot_wider(names_from = Gene, values_from = value, values_fill = list(value = 0))
+# 
+# # 2. Add the 'type' information (DCIS, IDC, etc.)
+# patient_types <- combined_all_brca %>%
+#   distinct(sample, type)
+# 
+# gene_matrix <- gene_matrix %>%
+#   left_join(patient_types, by = "sample")
+# 
+# # 3. Separate the type column from the numeric data
+# gene_data <- gene_matrix[,-c(1,79)]
+# gene_type <- gene_matrix$type
+# 
+# # 4. Run PCA
+# pca_result <- prcomp(gene_data, center = TRUE, scale. = TRUE)
+# 
+# # 5. Create a data frame for plotting
+# pca_df <- as.data.frame(pca_result$x)
+# pca_df$type <- gene_type
+# 
+# # 6. Plot PCA
+# ggplot(pca_df, aes(x = PC1, y = PC2, color = type)) +
+#   geom_point(size = 2, alpha = 0.8) +
+#   labs(
+#     title = "PCA of Mutation Profiles in Breast Cancer Patients",
+#     x = "Principal Component 1",
+#     y = "Principal Component 2"
+#   ) +
+#   theme_minimal() +
+#   scale_color_brewer(palette = "Set1")
+# 
+# ggplot(pca_df, aes(x = PC2, y = PC3, color = type)) +   
+#   geom_point(size = 2, alpha = 0.8) +   
+#   labs(
+#     title = "PCA of Mutation Profiles in Breast Cancer Patients",
+#     x = "Principal Component 1",
+#     y = "Principal Component 2"
+#   ) +   
+#   theme_minimal() +   
+#   scale_color_brewer(palette = "Set1") +   
+#   xlim(-25, 25) +   # Set limit for x-axis
+#   ylim(-25, 25)     # Set limit for y-axis
+# 
+
+```
+
+```{r}
+
+# Get top 20 genes based on how many unique patients have a mutation
+top_genes_brca <- combined_all_brca %>%
+  distinct(Gene, PatientID) %>%
+  count(Gene, name = "num_patients") %>%
+  arrange(desc(num_patients)) %>%
+  pull(Gene)
+
+# Total patients per group
+total_patients <- combined_all_brca %>%
+  distinct(PatientID, type) %>%
+  count(type, name = "total_patients")
+
+# Count how many patients per gene per group
+gene_patient_percent <- combined_all_brca %>%
+  filter(Gene %in% top_genes_brca) %>%
+  distinct(Gene, PatientID, type) %>%
+  count(Gene, type, name = "num_patients_with_mutation") %>%
+  left_join(total_patients, by = "type") %>%
+  mutate(percentage = 100 * num_patients_with_mutation / total_patients)
+
+```
+
+# Clonal relatedness synchronous DCIS-IDC
+
+```{r}
+
+# Obtain the synchronous samples
+synchronous_DCIS_IDC <- combined_all[combined_all$sample %in% samples_with_both, ]
+
+# Define a mutation ID for grouping
+synchronous_DCIS_IDC <- synchronous_DCIS_IDC %>%
+  mutate(
+    mutation_id = paste(Chrom, Location, REF, ALT, sep = "_")
+  )
+
+# Pick colors
+color_shared <- c('shared' = '#E8C842', 'private_DCIS' = '#E57E41', 'private_IDC' = '#D33F6A')
+
+# Generate 3 heat-based HCL colors
+my_colors <- heat_hcl(10)
+
+# Patient IDs with synchronous DCIS-IDC
+patients <- c('0355', '0332', '0169', '0193', '7419', '7402')
+
+# Create empty dataframe to store mutation data
+mutation_summary <- data.frame()
+
+for (pid in patients) {
+  patient_df <- synchronous_DCIS_IDC %>%
+    filter(PatientID == pid) %>%
+    mutate(mutation_id = paste(Chrom, Location, REF, ALT, sep = "_"))
+  
+  # Group mutations by DCIS and IDC
+  grouped <- patient_df %>%
+    group_by(group) %>%
+    summarise(mutations = list(unique(mutation_id)))
+  
+  # Initialize empty mutation sets
+  mutations_DCIS <- character()
+  mutations_IDC <- character()
+  
+  if ("DCIS" %in% grouped$group) {
+    mutations_DCIS <- grouped$mutations[[which(grouped$group == "DCIS")]]
+  }
+  if ("IDC" %in% grouped$group) {
+    mutations_IDC <- grouped$mutations[[which(grouped$group == "IDC")]]
+  }
+  
+  # Compute shared and private mutations
+  shared <- length(intersect(mutations_DCIS, mutations_IDC))
+  private_DCIS <- length(setdiff(mutations_DCIS, mutations_IDC))
+  private_IDC <- length(setdiff(mutations_IDC, mutations_DCIS))
+  total <- shared + private_DCIS + private_IDC
+  
+  mutation_summary <- rbind(
+    mutation_summary,
+    data.frame(
+      PatientID = pid,
+      shared = shared,
+      private_DCIS = private_DCIS,
+      private_IDC = private_IDC,
+      total = total
+    )
+  )
+}
+
+# Create long df
+mutation_long <- mutation_summary %>%
+  dplyr::select(PatientID, shared, private_DCIS, private_IDC) %>%
+  pivot_longer(cols = -PatientID, names_to = "Category", values_to = "Count")
+
+# Plot number of total mutations per patient
+plot_total <- ggplot(mutation_summary, aes(x = PatientID, y = total)) +
+  geom_bar(stat = "identity", fill = "#E2E6BD") +
+  labs(
+    title = "Total Number of Mutations per Patient",
+    x = "Patient ID",
+    y = "Total Mutation Count"
+  ) +
+  theme_minimal()
+
+# Calculate fraction of shared and private mutations per patient
+mutation_long_fraction <- mutation_long %>%
+  group_by(PatientID) %>%
+  mutate(Fraction = Count / sum(Count))
+
+# Plot distribution of fraction of shared and private mutations per patient
+plot_fraction <- ggplot(mutation_long_fraction, aes(x = PatientID, y = Fraction, fill = Category)) +
+  scale_fill_manual(values = color_shared) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Fraction of Shared and Private Mutations per Patient",
+    x = "Patient ID",
+    y = "Fraction",
+    fill = "Mutation Type"
+  ) +
+  theme_minimal()
+
+# Create both plots in one
+plot_total / plot_fraction
+
+```
+
+## VAF
+
+```{r}
+
+# Filter for the patient
+patient_df <- synchronous_DCIS_IDC %>%
+  filter(PatientID == '0355') %>%
+  mutate(mutation_id = paste(Chrom, Location, REF, ALT, sep = "_"))
+
+# Get DCIS and IDC mutations separately
+dcis_df <- patient_df %>%
+  filter(group == "DCIS") %>%
+  dplyr::select(mutation_id, VAF_DCIS = AF)
+idc_df <- patient_df %>%
+  filter(group == "IDC") %>%
+  dplyr::select(mutation_id, VAF_IDC = AF)
+
+# Full join to include all mutations (shared and private)
+all_mutations_df <- full_join(dcis_df, idc_df, by = "mutation_id") %>%
+  mutate(
+    VAF_DCIS = ifelse(is.na(VAF_DCIS), 0, VAF_DCIS),
+    VAF_IDC  = ifelse(is.na(VAF_IDC),  0, VAF_IDC)
+  )
+
+# Calculate shared and private mutations to get status
+all_mutations_df <- all_mutations_df %>%
+  mutate(status = case_when(
+    VAF_DCIS > 0 & VAF_IDC > 0 ~ "Shared",
+    VAF_DCIS > 0 ~ "DCIS-private",
+    VAF_IDC > 0 ~ "IDC-private" ))
+
+# Plot VAF 
+ggplot(all_mutations_df, aes(x = VAF_DCIS, y = VAF_IDC, color=status)) +
+  geom_point(alpha = 0.8) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+  labs(
+    title = "VAF Comparison: All Mutations in Patient 0355",
+    x = "VAF in DCIS",
+    y = "VAF in IDC", 
+    color = 'Mutation type'
+  ) +
+  theme_minimal()
+
+```
+
+## Now between every sample
+
+```{r}
+
+# Get mutation list per sample
+sample_mutations <- synchronous_DCIS_IDC %>%
+  group_by(sample) %>%
+  summarise(mutations = list(unique(mutation_id)), .groups = "drop")
+
+# Get all unique combinations of sample pairs
+sample_pairs <- combn(sample_mutations$sample, 2, simplify = FALSE)
+
+# Initialize result dataframe
+pairwise_comparison <- tibble()
+
+# Loop through each pair
+for (pair in sample_pairs) {
+  sample1 <- pair[1]
+  sample2 <- pair[2]
+  
+  muts1 <- sample_mutations$mutations[[which(sample_mutations$sample == sample1)]]
+  muts2 <- sample_mutations$mutations[[which(sample_mutations$sample == sample2)]]
+  
+  shared <- length(intersect(muts1, muts2))
+  private1 <- length(setdiff(muts1, muts2))
+  private2 <- length(setdiff(muts2, muts1))
+  total <- shared + private1 + private2
+  
+  pairwise_comparison <- bind_rows(pairwise_comparison, tibble(
+    sample1 = sample1,
+    sample2 = sample2,
+    shared = shared,
+    private_sample1 = private1,
+    private_sample2 = private2,
+    total = total
+  ))
+}
+
+# Convert to matrix-friendly format
+heatmap_data <- pairwise_comparison %>%
+  dplyr::select(sample1, sample2, shared)
+
+# Duplicate in reverse to make the matrix symmetric
+symmetric_data <- bind_rows(
+  heatmap_data,
+  heatmap_data %>% rename(sample1 = sample2, sample2 = sample1)
+)
+
+# Add diagonal (self-similarity)
+samples <- unique(c(pairwise_comparison$sample1, pairwise_comparison$sample2))
+diag_data <- tibble(sample1 = samples, sample2 = samples, shared = NA)  
+
+# Combine all
+heatmap_complete <- bind_rows(symmetric_data, diag_data)
+
+# Plot
+ggplot(heatmap_complete, aes(x = sample1, y = sample2, fill = shared)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "white", high = "steelblue", na.value = "gray90") +
+  labs(title = "Pairwise Shared Mutations Heatmap",
+       x = "Sample", y = "Sample", fill = "# Shared") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Extract patient ID
+heatmap_complete <- heatmap_complete %>%
+  mutate(PatientID = str_extract(sample1, "\\d+$"))
+
+# Generate custom order
+ordered_samples <- synchronous_DCIS_IDC %>%
+  distinct(sample) %>%
+  mutate(PatientID = str_extract(sample, "\\d+$")) %>%
+  arrange(PatientID, sample) %>%
+  pull(sample)
+
+# Convert to factor with levels
+heatmap_complete <- heatmap_complete %>%
+  mutate(
+    sample1 = factor(sample1, levels = ordered_samples),
+    sample2 = factor(sample2, levels = ordered_samples)
+  )
+
+# Plot heatmap
+ggplot(heatmap_complete, aes(x = sample1, y = sample2, fill = shared)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "white", high = "darkred", na.value = "gray90") +
+  labs(title = "Shared Mutations Between Samples",
+       x = "Sample", y = "Sample", fill = "# Shared") +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank()
+  )
+```

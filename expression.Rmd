@@ -1,0 +1,401 @@
+---
+title: "expression"
+date: "2025-04-25"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Install packages
+
+```{r}
+options(repos = c(CRAN = "https://cloud.r-project.org/"))
+
+# Install packages
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+install.packages('BiocManager')
+BiocManager::install('genefu')
+install.packages("e1071")  # Needed for CIBERSORT
+install.packages("preprocessCore")  # Needed for quantile normalization
+
+```
+
+## Load packages
+
+```{r}
+library('dplyr')
+library(tidyr)         # for reshaping data
+library(RColorBrewer)  # for color palettes 
+library(viridis)       # for color palettes
+library(ggplot2)
+library('genefu')
+library(ggpubr)  
+library(pheatmap)
+```
+
+# Determine colors
+
+```{r}
+# Determine colors
+histology_colors <- c(
+    "pure DCIS (n=7)" = "#1f77b4", 
+    "pure IDC (n=6)" = "#d73027", 
+    "DCIS & IDC (n=20)" = "#4DAF4A")
+
+# Determine colors
+histology_colors_simple <- c(
+    "DCIS" = "#1f77b4", 
+    "IDC" = "#d73027", 
+    "DCIS & IDC" = "#4DAF4A")
+```
+
+# Determine patient info
+
+```{r}
+# Patient numbers with DCIS
+DCIS_patients <- c('7420','7419', '7416', '7408', '7402','7394', '7389', '7386', '7379', '7363', '0648', '0455', '0355', '0332', '0232', '0193', '0169')
+
+# Patient numbers with IDC
+IDC_patients <- c('7419', '7402', '0711', '0553', '0537', '0496', '0493', '0445',
+                  '0443', '0387', '0375', '0355', '0332', '0198', '0193', '0169')
+
+
+# PatientIDs of patients with synchronous DCIS & IDC
+patients_with_both <- c('0169', '0193', '0332', '0355', '7419', '7402')
+
+samples_with_both <- c('DCIS_0169', 'DCIS_0193', 'DCIS_0332', 'DCIS_0355', 'DCIS_7419', 'DCIS_7402', 'IDC_0169', 'IDC_0193', 'IDC_0332', 'IDC_0355', 'IDC_7419', 'IDC_7402')
+
+# PatientIDs of patients with pure IDC
+patients_only_idc <- c('0198', '0443', '0493', '0496', '0553', '0445')
+
+# PatientIDs of patients with pure DCIS
+patients_only_dcis <- c('7363', '7379', '7386', '7408', '7416', '7420',
+                        '0232')
+
+# Patients with synchronous DCIS & IDC
+synchronous_patients <- c('0169', '0193', '0332', '0355', '7419', '7402', '0375', '0387', 
+                           '0537', '0648', '0711', '7389', '7394', '0455')
+
+```
+
+# Load expression data
+
+```{r, echo=FALSE}
+
+#expression_data <- read.table("C:/Users/s.petersen/gene_expression/expression_converted.txt", 
+                            #  header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+
+expression_data <- read.table("/Users/sannepetersen/Documents/Bioinformatics and systems biology/NKI Bioinformatics/expression/expression_converted.txt", 
+                              header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+
+
+ensembl <- expression_data$EnsemblGeneID
+
+# Save as a text file
+#write.table(expression_data$EnsemblGeneID, file = "C:/Users/s.petersen/gene_expression/ensembl_gene_ids.txt", 
+ #           quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+# Save as a text file
+#write.table(expression_genes_data, file = "C:/Users/s.petersen/gene_expression/new_expression.txt", 
+          #  quote = FALSE, row.names = FALSE, col.names = TRUE)
+
+```
+
+# FPKM
+
+```{r}
+
+# Install if you haven't
+if (!requireNamespace("GenomicFeatures", quietly = TRUE))
+  BiocManager::install("GenomicFeatures")
+
+library(GenomicFeatures)
+
+# Step 1: Load GTF file and build a TxDb object
+txdb <- makeTxDbFromGFF("/Users/sannepetersen/Documents/Bioinformatics and systems biology/NKI Bioinformatics/Homo_sapiens.GRCh38.114.gtf", format = "gtf")
+
+# Step 2: Extract exons by gene
+exons <- exonsBy(txdb, by = "gene")
+
+# Step 3: Reduce overlapping exons (to avoid double-counting) and sum widths
+# Reduce overlapping exons for each gene
+reduced_exons <- GenomicRanges::reduce(exons)
+
+# Calculate total gene length as sum of reduced exon widths
+gene_lengths <- sum(width(reduced_exons))
+
+# Step 4: Convert to data frame
+gene_lengths_df <- data.frame(
+  gene_id = names(gene_lengths),
+  length = as.numeric(gene_lengths)
+)
+
+# Step 5 (optional): Save to file
+write.csv(gene_lengths_df, "/Users/sannepetersen/Documents/Bioinformatics and systems biology/NKI Bioinformatics/gene_lengths_hg38.csv", row.names = FALSE)
+
+# Load expression data
+expression_data <- read.table("/Users/sannepetersen/Documents/Bioinformatics and systems biology/NKI Bioinformatics/expression/expression_converted.txt", 
+                              header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+
+# Step 1: Convert gene_lengths_df to length_kb
+gene_lengths_df <- gene_lengths_df %>%
+  mutate(length_kb = length / 1000)
+
+# Step 2: Reshape expression_data from wide to long for easier processing
+expr_long <- expression_data %>%
+  pivot_longer(cols = -EnsemblGeneID, names_to = "sample", values_to = "raw_counts")
+
+# Step 3: Calculate total counts per sample
+total_counts <- expr_long %>%
+  group_by(sample) %>%
+  summarise(total_counts = sum(raw_counts, na.rm = TRUE))
+
+# Step 4: Join gene lengths
+expr_long <- expr_long %>%
+  left_join(gene_lengths_df, by = c("EnsemblGeneID" = "gene_id"))
+
+# Step 5: Join total counts
+expr_long <- expr_long %>%
+  left_join(total_counts, by = "sample")
+
+# Calculate FPKM
+# 1)Count up the total reads in a sample and divide that number by 1,000,000 – this is our “per million” scaling factor.
+# 2)Divide the read counts by the “per million” scaling factor. This normalizes for sequencing depth, giving you reads per million (RPM)
+# 3)Divide the RPM values by the length of the gene, in kilobases. This gives you RPKM.
+expr_long <- expr_long %>%
+  mutate(FPKM = raw_counts / (length_kb * (total_counts / 1e6)))
+
+# Save expression with FPKM 
+write.csv(expr_long, "/Users/sannepetersen/Documents/Bioinformatics and systems biology/NKI Bioinformatics/FPKM_expression.csv", row.names = FALSE)
+
+# open it here
+expr_long <- read.csv("/Users/sannepetersen/Documents/Bioinformatics and systems biology/NKI Bioinformatics/FPKM_expression.csv")
+
+```
+
+# PAM50 subtype classification
+
+```{r}
+
+# # Obtain gene df
+# gene_info <- as.data.frame(expression_genes_data[,1])
+# 
+# # See whether selected pam50 are duplicated
+# data(pam50.robust)
+# pam50_genes <- pam50.robust$centroids.map$probe
+# selected_pam50 <- expression_genes_data[expression_genes_data$Gene %in% pam50_genes, ]
+# 
+# # Remove the duplicated genes
+# expression_genes_data <- expression_genes_data[!duplicated(expression_genes_data[,1]), ]
+# 
+# # Set gene names as rownames
+# rownames(expression_genes_data) <- expression_genes_data$Gene
+# expression_genes_data <- expression_genes_data[ , -1]
+# 
+# # Transpose data
+# texp <- t(expression_genes_data)
+# 
+# # Make predictions
+# pam50_predictions <- molecular.subtyping(
+#   sbt.model = 'pam50',
+#   data = texp,
+#   annot = gene_info,
+#   do.mapping = FALSE)
+# 
+# # Obtain subtypes
+# subtypes <- as.data.frame(pam50_predictions$subtype.crisp)
+# subtypes <- as.data.frame(pam50_predictions$subtype.crisp)
+# 
+# # Assuming pam50_predictions is your object, extract the probabilities
+# proba_matrix <- pam50_predictions$subtype.proba
+# 
+# # Convert to a data frame if needed (optional)
+# proba_df <- as.data.frame(proba_matrix)
+# 
+# # Create a heatmap of subtype probabilities
+# pheatmap(proba_df, 
+#          scale = "none",  # no scaling, just use the raw probabilities
+#          cluster_rows = FALSE,  # cluster patients based on probabilities
+#          cluster_cols = TRUE,  # cluster subtypes based on probabilities
+#          display_numbers = TRUE,  # show the probabilities as numbers in the heatmap
+#          fontsize = 7,  # adjust the font size
+#          main = "Subtype Probability Heatmap")  # add a title
+# 
+
+```
+
+```{r}
+
+data_genes <- read.csv("/Users/sannepetersen/Documents/Bioinformatics and systems biology/NKI Bioinformatics/expression/gProfiler_hsapiens.csv")
+
+merged_data <- merge(expr_long, data_genes, by.x ="EnsemblGeneID", by.y= "initial_alias")
+
+expression_genes_data <- merged_data[,c(1,2,7,8)]
+
+# Move last column to first
+colnames(expression_genes_data)[4] <- "Gene"
+
+# Get patient ID and group
+expression_genes_data <- expression_genes_data %>%
+  separate(sample, into = c("patient_id", "group"), sep = "\\.")
+
+# Remove HX
+expression_genes_data <- expression_genes_data %>%
+  mutate(ID = sub("^HX", "", patient_id))
+
+# Change IBC to IDC
+expression_genes_data <- expression_genes_data %>%
+  mutate(group = ifelse(group == "IBC", "IDC", group))
+
+# Create ID as in other df
+expression_genes_data$patient <- paste(expression_genes_data$group, expression_genes_data$ID, sep = '_')
+
+# Load neoantigen burden data
+neoantigen_burden <- read.table("/Users/sannepetersen/Documents/Bioinformatics and systems biology/NKI Bioinformatics/neoantigen_burden.csv", 
+                              header = TRUE, sep = ",", stringsAsFactors = FALSE)
+
+
+# Combine neoantigen load with expression data
+expression_genes_data_merge <- merge(expression_genes_data, neoantigen_burden, by.x ="patient", by.y= "patient")
+
+```
+
+## Load vs expression
+
+```{r}
+# Select genes of interest
+genes_of_interest <- c("TRBC2", "CD4", "CD8A", "PRF1", "GZMA", "GZMB", 'TCRB', 'FOXP3')
+
+# Filter for selected genes
+subset_data <- expression_genes_data_merge %>%
+  filter(Gene %in% genes_of_interest)
+
+# Define the order of the x-axis
+subset_data$type <- factor(
+  subset_data$type,
+  levels = c("pure DCIS (n=7)", "DCIS & IDC (n=20)", "pure IDC (n=6)")
+)
+
+# Create plot
+ggplot(subset_data, aes(x = count, y = FPKM)) +
+  geom_point(aes(color = type)) +
+  facet_wrap(~Gene, scales = "free_y") +
+  scale_color_manual(values = histology_colors)+
+  stat_smooth(method = "lm", se = FALSE, color = "black", linetype = "dashed") +
+stat_cor(
+  method = "pearson",
+  label.x.npc = "left",
+  label.y.npc = "top",
+  size = 2,
+  color = "black"
+) +
+  labs(
+    x = "Neoantigen Burden",
+    y = "Gene Expression (FPKM)",
+    title = "Relationship Between Neoantigen Burden and T Cell Marker Expression"
+  ) +
+  theme_minimal()
+```
+
+# HLA genes
+
+```{r}
+
+# Filter for HLA class I genes
+hla_classI_genes <- c("HLA-A", "HLA-B", "HLA-C")
+
+# Select HLA data
+hla_expression <- expression_genes_data_merge %>%
+  filter(Gene %in% hla_classI_genes)
+
+# Define the order of the x-axis
+hla_expression$type <- factor(
+  hla_expression$type,
+  levels = c("pure DCIS (n=7)", "DCIS & IDC (n=20)", "pure IDC (n=6)")
+)
+
+# Plot distribution
+ggplot(hla_expression, aes(x = type, y = FPKM, fill = type)) +
+  geom_violin(trim = FALSE, scale = "width", alpha = 0.6) +
+  geom_jitter(width = 0.2, size = 1, alpha = 0.6) +
+  facet_wrap(~ Gene, scales = "free_y") +
+  scale_fill_manual(values = histology_colors) +  # use your custom color vector
+  theme_minimal() +
+  labs(
+    title = "Distribution of HLA Class I Gene Expression by Type",
+    x = "Sample Type",
+    y = "FPKM (Expression)"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  )
+
+
+# Create plot
+ggplot(hla_expression, aes(x = (count), y = (FPKM))) +
+  geom_point(aes(color = type)) +
+  facet_wrap(~Gene, scales = "free_y") +
+  scale_color_manual(values = histology_colors)+
+  stat_smooth(method = "lm", se = FALSE, color = "black", linetype = "dashed") +
+  stat_cor(
+  method = "pearson",
+  label.x.npc = "left",
+  label.y.npc = "top",
+  size = 2,
+  color = "black"
+)+
+  labs(
+    x = "Neoantigen Burden",
+    y = "Gene Expression (FPKM)",
+    title = "Relationship Between Neoantigen Burden and T Cell Marker Expression"
+  ) +
+  theme_minimal()
+
+```
+
+## Comparing synchronous pairs
+
+```{r}
+
+# Select only synchronous pairs
+expression_genes_synch <- expression_genes_data[expression_genes_data$ID
+                                                %in% patients_with_both, ]
+
+# Select genes
+genes_selected <- c(genes_of_interest, hla_classI_genes)
+
+# Filter for selected genes only
+df_filtered <- expression_genes_synch %>%
+  filter(Gene %in% genes_selected)
+
+# Ensure group.x is a factor with specific order
+df_filtered$group.x <- factor(df_filtered$group, levels = c("DCIS", "IDC"))
+
+# Plot: one plot per gene
+ggplot(df_filtered, aes(x = FPKM, y = Gene, fill = group.x)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8)) +
+  facet_wrap(~ ID, scales = "free_y", ncol = 3) +  # You can change ncol to adjust layout
+  labs(
+    title = "FPKM Expression of Selected Genes in DCIS vs IDC Samples",
+    x = "Patient ID",
+    y = "FPKM Expression",
+    fill = "Group"
+  ) +
+  theme_minimal() +
+  scale_fill_manual(values = histology_colors_simple)+
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1),
+    strip.text = element_text(size = 10, face = "bold")
+  )
+
+```

@@ -1,0 +1,332 @@
+---
+title: "Optitype analysis"
+date: "2025-04-25"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load packages
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(corrplot)
+library(viridis)
+library(tibble)
+```
+
+## Determine colors
+
+```{r}
+# Determine colors
+histology_colors <- c(
+    "pure DCIS (n=7)" = "#1f77b4", 
+    "pure IDC (n=6)" = "#d73027", 
+    "DCIS & IDC (n=20)" = "#4DAF4A")
+
+# Determine colors
+histology_colors_simple <- c(
+    "DCIS" = "#1f77b4", 
+    "IDC" = "#d73027", 
+    "DCIS & IDC" = "#4DAF4A")
+```
+
+## Load data
+
+```{r load data}
+
+# Define the folder path for on macbook
+folder_path <- "/Users/sannepetersen/Documents/Bioinformatics and systems biology/NKI Bioinformatics/Optitype/normal"
+
+# List all .tsv files in the folder
+tsv_files <- list.files(path = folder_path, pattern = "\\.tsv$", full.names = TRUE)
+
+# Read all .tsv files into a list
+tsv_list <- lapply(tsv_files, read.delim)
+
+# Name the list elements with filenames
+names(tsv_list) <- basename(tsv_files)
+
+# Combine files
+optitype_data <- do.call(rbind, tsv_list)
+
+# Add information columns
+optitype_data$patient <- sub(".*_HX([0-9]+)_.*", "\\1", rownames(optitype_data))
+
+# Create long df
+hla_long <- optitype_data %>%
+  pivot_longer(cols = c(A1, A2, B1, B2, C1, C2),
+               names_to = "HLA_locus",
+               values_to = "HLA_allele")
+
+```
+
+## Prepare data
+
+### Patient IDs
+
+```{r}
+# Patient numbers with DCIS
+DCIS_patients <- c('7420','7419', '7416', '7408', '7402','7394', '7389', '7386', '7379', '7363', '0648', '0455', '0355', '0332', '0232', '0193', '0169')
+
+# Patient numbers with IDC
+IDC_patients <- c('7419', '7402', '0711', '0553', '0537', '0496', '0493', '0445',
+                  '0443', '0387', '0375', '0355', '0332', '0198', '0193', '0169')
+
+
+# PatientIDs of patients with synchronous DCIS & IDC
+patients_with_both <- c('0169', '0193', '0332', '0355', '7419', '7402')
+
+samples_with_both <- c('DCIS_0169', 'DCIS_0193', 'DCIS_0332', 'DCIS_0355', 'DCIS_7419', 'DCIS_7402', 'IDC_0169', 'IDC_0193', 'IDC_0332', 'IDC_0355', 'IDC_7419', 'IDC_7402')
+
+# PatientIDs of patients with pure IDC
+patients_only_idc <- c('0198', '0443', '0493', '0496', '0553', '0445')
+
+# PatientIDs of patients with pure DCIS
+patients_only_dcis <- c('7363', '7379', '7386', '7408', '7416', '7420',
+                        '0232')
+
+# Patients with synchronous DCIS & IDC
+synchronous_patients <- c('0169', '0193', '0332', '0355', '7419', '7402', '0375', '0387', 
+                           '0537', '0648', '0711', '7389', '7394', '0455')
+
+
+```
+
+### Add patient type information
+
+```{r}
+
+# Add a 'type' column based on patient group
+hla_long <- hla_long %>%
+  mutate(type = case_when(
+    patient %in% synchronous_patients ~ "DCIS & IDC (n=20)",
+    patient %in% patients_only_idc ~ "pure IDC (n=6)",
+    patient %in% patients_only_dcis ~ "pure DCIS (n=7)",
+    TRUE ~ "Unknown" 
+  ))
+
+# Add a 'type' column based on patient group
+optitype_data <- optitype_data %>%
+  mutate(type = case_when(
+    patient %in% synchronous_patients ~ "DCIS & IDC (n=20)",
+    patient %in% patients_only_idc ~ "pure IDC (n=6)",
+    patient %in% patients_only_dcis ~ "pure DCIS (n=7)",
+    TRUE ~ "Unknown" 
+  ))
+
+```
+
+## Plot data
+
+### HLA occurrence per patient
+
+```{r}
+
+# Count how many distinct alleles there are per patient
+hla_count_per_patient <- hla_long %>%
+  group_by(patient) %>%
+  summarize(count = n_distinct(HLA_allele))
+
+# Create long df and count alleles
+hla_long_unique <- hla_long %>%
+  group_by(patient, HLA_allele) %>%
+  mutate(
+    type = ifelse(n_distinct(type) > 1, "DCIS & IDC", type) 
+  ) %>%
+  group_by(patient, HLA_allele, type) %>%
+  mutate(
+    type = ifelse(n() > 1, "Homozygous", type) 
+  ) %>%
+  ungroup() %>%
+  dplyr::select(patient, HLA_allele, type) %>%
+  distinct()
+
+# Pick colors
+viridis_col <- viridis(4)
+
+# Create plot
+ggplot(hla_long_unique, aes(x = patient, y = HLA_allele, fill = type)) +   
+  geom_tile(color = "black") +   
+  scale_fill_manual(values = c("pure IDC (n=6)" = viridis_col[1], "pure DCIS (n=7)" = viridis_col[2], 'DCIS & IDC (n=20)' = viridis_col[3], 
+                    'Homozygous' = viridis_col[4])) +   
+  labs(title = "HLA typing differences between IDC and DCIS", 
+       x = "Patient", y = "HLA allele", fill = 'Histology') +   
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1),  # Rotate x-axis labels by 90 degrees
+    axis.text.y = element_text(size = 6)  # Make y-axis text smaller
+  )
+
+```
+
+### HLA counts plot overall
+
+```{r}
+
+# Count How Often Each Allele Occurs
+hla_counts <- hla_long %>%
+  group_by(HLA_allele) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  arrange(desc(count))
+
+# Create plot
+ggplot(hla_counts, aes(x = reorder(HLA_allele, count), y = count, fill = count)) +   
+  geom_bar(stat = "identity", color = "white") +   
+  scale_fill_gradient(low = "skyblue", high = "darkblue") +     
+  coord_flip() +  # Flip the bars for better readability   
+  labs(title = "HLA allele frequency all patients",
+       x = "HLA allele", y = "Count") +   
+  guides(fill = "none") +  # Remove legend
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 6))  # Adjust Y-axis text size
+
+
+```
+
+### Analysis of reads
+
+```{r}
+
+# Plot read count
+ggplot(hla_long, aes(x = patient, y = Reads, color = type, group = type)) +
+  geom_point(size = 2) +  
+  geom_line(size = 1) +
+  scale_color_manual(values = c("DCIS" = viridis_col[2], "IDC" = viridis_col[1])) +  
+  labs(title = "Reads OptiType",
+       x = "Patient",
+       y = "Reads",
+       color = "Type") +  # Fixed legend title
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))  #
+
+```
+
+### HLA type frequency distribution plot
+
+```{r}
+
+# Create plot of allele frequency distribution
+ggplot(hla_long, aes(x = HLA_allele, fill = type)) +
+  geom_bar(position = "fill") +  # Stacked bar chart
+  scale_fill_manual(values = histology_colors) +
+  labs(title = "HLA allele frequency distribution", x = "HLA allele", y = "Proportion", 
+       fill = 'Histology') +
+  theme_minimal() +
+    theme(
+    axis.text.x = element_text(angle = 90, hjust = 1) 
+  )
+
+```
+
+### HLA type count distribution plot
+
+```{r}
+
+# Define the order of the x-axis
+hla_long$type <- factor(
+  hla_long$type,
+  levels = c("pure DCIS (n=7)", "DCIS & IDC (n=20)", "pure IDC (n=6)")
+)
+
+# Create plot of allele count distribution
+ggplot(hla_long, aes(x = HLA_allele, fill = type)) + 
+  geom_bar(position = "stack") +  
+  scale_fill_manual(values = histology_colors) +
+  labs(
+    title = "HLA allele count distribution",
+    x = "HLA allele",
+    y = "Count",
+    fill = "Histology"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1)
+  )
+
+```
+
+### Correlation plot
+
+```{r}
+# Create a numeric data frame for correlation analysis
+hla_numeric <- optitype_data %>%
+  dplyr::select(A1, A2, B1, B2, C1, C2) %>%
+  mutate_all(as.character) %>%
+  mutate_all(~factor(., levels = unique(.)) %>% as.integer) 
+
+# Compute the correlation matrix
+cor_matrix <- cor(hla_numeric, use = "complete.obs")
+
+# Plot the correlation matrix
+corrplot(cor_matrix, method = "circle", type = "upper", diag = FALSE)
+
+
+```
+
+### Correlation plot between patients
+
+```{r}
+
+# Create a new column combining patient and type
+optitype_data <- optitype_data %>%
+  mutate(ID = paste(patient, type, sep = "_"))  
+
+# Obtain alleles
+alleles_classI <- unique(hla_long$HLA_allele)
+
+# Assign each allele a unique integer
+allele_to_integer <- setNames(seq_along(alleles_classI), alleles_classI)
+
+# Apply the allele_to_integer mapping to the optitype_data columns (A1, A2, B1, B2, C1, C2)
+hla_numeric1 <- optitype_data %>% 
+  dplyr::select(ID, A1, A2, B1, B2, C1, C2) %>%
+  mutate(across(c(A1, A2, B1, B2, C1, C2), ~allele_to_integer[.]))
+
+# Convert to df
+hla_numeric1 <- as.data.frame(hla_numeric1)
+
+# Create wide format
+hla_numeric_wide <- hla_numeric1 %>%
+  mutate(across(c(A1, A2, B1, B2, C1, C2), ~allele_to_integer[.]))
+rownames(hla_numeric_wide) <- NULL
+hla_numeric_wide <- column_to_rownames(hla_numeric_wide, "ID")
+
+# Compute correlation matrix between patients
+cor_matrix <- cor(t(hla_numeric_wide), use = "complete.obs")  
+
+# Plot the correlation matrix
+corrplot(cor_matrix, method = "circle", type = "upper", diag = FALSE, tl.cex = 0.7)
+
+```
+
+### Homozygous and heterozygous distribution plot
+
+```{r}
+# Summarize the counts of 'Homozygous' and 'Heterozygous'
+hla_zygous_summary <- hla_long_unique %>%
+  mutate(zygous = ifelse(type == "Homozygous", "Homozygous", "Heterozygous")) %>%
+  count(zygous) %>%
+  mutate(percentage = n / sum(n) * 100) 
+
+# Plot the pie chart with percentage labels
+ggplot(hla_zygous_summary, aes(x = "", y = percentage, fill = zygous)) +
+  geom_bar(stat = "identity", width = 1) + 
+  coord_polar(theta = "y") +  
+  scale_fill_manual(values = c("Homozygous" = "blue", "Heterozygous" = "lightblue")) +  
+  labs(title = "Proportion of Homozygous vs Heterozygous Alleles") +
+  theme_void() + 
+  theme(legend.title = element_blank()) + 
+  geom_text(aes(label = paste0(round(percentage, 1), "%")), position = position_stack(vjust = 0.5), color = "white", size = 3) 
+
+
+```

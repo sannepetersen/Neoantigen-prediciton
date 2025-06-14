@@ -1,0 +1,2794 @@
+---
+title: "neoantigens"
+date: "2025-05-28"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(repos = c(CRAN = "https://cloud.r-project.org/"))
+```
+
+# Install packages
+
+```{r}
+# Install packages
+install.packages('ggbeeswarm')
+install.packages("ggforce")  
+```
+
+# Determine colors
+
+```{r}
+# Determine colors
+histology_colors <- c(
+    "pure DCIS (n=7)" = "#1f77b4", 
+    "pure IDC (n=6)" = "#d73027", 
+    "DCIS & IDC (n=20)" = "#4DAF4A")
+
+# Determine colors
+histology_colors_simple <- c(
+    "DCIS" = "#1f77b4", 
+    "IDC" = "#d73027", 
+    "DCIS & IDC" = "#4DAF4A")
+```
+
+# Load packages
+
+```{r}
+# Load packages
+library(vroom)
+library(readr)
+library(dplyr)
+library(stringr)  
+library(R.utils)
+library(tidyr)
+library(BiocManager)
+library(rtracklayer)
+library(IRanges)
+library(data.table)
+library(forcats)
+library(ggplot2)
+library(BSgenome)
+library(BSgenome.Hsapiens.UCSC.hg38)  
+library(biomaRt)
+library(viridis)
+library(tidyverse)
+library(ggbeeswarm) 
+library(maftools)
+library(vcf2mafR)
+library(RColorBrewer)
+library(ggridges)
+library(pathwayTMB)
+library(maftools)
+library(ggforce)
+library(boot)
+library(pheatmap)
+```
+
+# Patient IDs DCIS and IDC
+
+```{r}
+# Patient numbers with DCIS
+DCIS_patients <- c('7420','7419', '7416', '7408', '7402','7394', '7389', '7386', '7379', '7363', '0648', '0455', '0355', '0332', '0232', '0193', '0169')
+
+# Patient numbers with IDC
+IDC_patients <- c('7419', '7402', '0711', '0553', '0537', '0496', '0493', '0445',
+                  '0443', '0387', '0375', '0355', '0332', '0198', '0193', '0169')
+
+# PatientIDs of patients with synchronous DCIS & IDC pairs
+patients_with_both <- c('0169', '0193', '0332', '0355', '7419', '7402')
+samples_with_both <- c('DCIS_0169', 'DCIS_0193', 'DCIS_0332', 'DCIS_0355', 'DCIS_7419', 'DCIS_7402', 'IDC_0169', 'IDC_0193', 'IDC_0332', 'IDC_0355', 'IDC_7419', 'IDC_7402')
+
+# PatientIDs of patients with pure IDC
+patients_only_idc <- c('0198', '0443', '0493', '0496', '0553', '0445')
+
+# PatientIDs of patients with pure DCIS
+patients_only_dcis <- c('7363', '7379', '7386', '7408', '7416', '7420',
+                        '0232')
+
+# Patients with synchronous DCIS & IDC
+synchronous_patients <- c('0169', '0193', '0332', '0355', '7419', '7402', '0375', '0387', 
+                           '0537', '0648', '0711', '7389', '7394', '0455')
+```
+
+# Load all neoantigens
+
+```{r}
+
+# Path to file with all neoantigens
+agg_all_path <- c('/Users/sannepetersen/Documents/Bioinformatics and systems biology/NKI Bioinformatics/Bestanden/all_neoantigens.txt')
+
+# Load df neoantigens
+all_neoantigens <- read.table(agg_all_path, sep = "\t", header = TRUE, stringsAsFactors = FALSE)
+
+# Make sure they all got 4 letters (the 0 disappeared when converted to numeric)
+all_neoantigens <- all_neoantigens %>%
+  mutate(patientID = as.character(patientID),
+         patientID = if_else(nchar(patientID) == 3,
+                             paste0("0", patientID),
+                             patientID))
+
+# Rename type
+all_neoantigens$type[all_neoantigens$type == "pure DCIS (n=6)"] <- "pure DCIS (n=7)"
+
+# Create patient column
+all_neoantigens$patient <- paste(all_neoantigens$group, all_neoantigens$patientID, sep = "_")
+
+# Define the order of the x-axis
+all_neoantigens$type <- factor(
+  all_neoantigens$type,
+  levels = c("pure DCIS (n=7)", "DCIS & IDC (n=20)", "pure IDC (n=6)")
+)
+
+# Define a mutation ID 
+all_neoantigens <- all_neoantigens %>%
+  mutate(
+    mutation_id = paste(Chromosome, Start, Stop, Reference, Variant, MT.Epitope.Seq, sep = "_"),
+    mutation_id2 = paste(Chromosome, Start, Stop, Reference, Variant, MT.Epitope.Seq, HLA.Allele, sep = "_")
+  )
+
+# Filter the double transcript isoforms out that lead to the same neoantigens
+all_neoantigens <- all_neoantigens %>%
+  group_by(sample) %>%
+  distinct(mutation_id2, .keep_all = TRUE)
+
+# Obtain df for synchrnous DCIS & IDC
+synchronous_dcis_idc <- all_neoantigens[all_neoantigens$patientID %in% patients_with_both, ]
+```
+
+# Results
+
+## Binding affinity
+
+### Binding affinity counts
+
+```{r}
+
+# See in how many patients neoantigens are found after filtering
+length(unique(all_neoantigens$sample))
+
+# See how many unique peptides are found after filtering
+length(unique(all_neoantigens$MT.Epitope.Seq))
+
+# Calculate percentage of each binding category in total
+neoantigen_patient <- all_neoantigens %>%
+  group_by(patient, group, type) %>%
+  summarise(count = n(), .groups = 'drop') %>%  
+  ungroup() 
+
+# Define patients and binding levels that have no predicted neoantigens
+patients <- c("DCIS_7389", "DCIS_7419", "IDC_7419", "DCIS_7416")
+group <- c('DCIS', 'DCIS', 'IDC', 'DCIS')
+type <- c('DCIS & IDC (n=20)', 'DCIS & IDC (n=20)', 'DCIS & IDC (n=20)', 'pure DCIS (n=7)')
+count <- c(0, 0, 0, 0)
+
+# Create data frame with patients that don't have predicted neoantigens
+missing_patients_neo <- data.frame(
+  patient = patients,
+  group = group,
+  type = type,
+  count = count,
+  stringsAsFactors = FALSE
+)
+
+# Add missing patients to the main summary dataframe
+agg_all_filtered_count <- bind_rows(neoantigen_patient, missing_patients_neo)
+
+# Save to file
+write.csv(agg_all_filtered_count, "/Users/sannepetersen/Documents/Bioinformatics and systems biology/NKI Bioinformatics/neoantigen_burden.csv", row.names = FALSE)
+
+# Calculate percentage of each binding category in total
+neoantigen_binding_count <- all_neoantigens %>%
+  group_by(binding) %>%
+  summarise(count = n(), .groups = 'drop') %>%  
+  mutate(percentage = count / sum(count) * 100) %>%  
+  ungroup() 
+
+# Calculate percentage of each binding category for each patient
+agg_all_filtered_percentage <- all_neoantigens %>%
+  group_by(patient, binding) %>%
+  summarise(count = n(), .groups = 'drop') %>%  
+  group_by(patient) %>%  
+  mutate(percentage = count / sum(count) * 100) %>%  
+  ungroup() 
+
+# Calculate count of each binding category for each patient
+agg_all_filtered_count <- all_neoantigens %>%
+  group_by(patient, binding) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  ungroup() 
+```
+
+### Plot binding affinity distribution
+
+```{r}
+
+# Create the stacked bar plot with percentages
+ggplot(agg_all_filtered_percentage, aes(x = patient, y = percentage, fill = binding)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Binding Affinity Distribution by Patient",
+       x = "Patient",
+       y = "Percentage of neoepitopes", 
+       fill = 'Binding') +
+  scale_fill_manual(values = c("strong" = "#4DAF4A", "medium" = "#984EA3", "weak" = "#fee08b", "NA" = "gray")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Determine the order
+agg_all_filtered_count$binding <- factor(
+  agg_all_filtered_count$binding,
+  levels = c("strong", "medium", "weak", "NA")
+)
+
+# Define patients and binding levels
+patients <- c("DCIS_7389", "DCIS_7419", "IDC_7419", "DCIS_7416")
+bindings <- c("weak", "medium", "strong")
+
+# Create all combinations
+missing_patients_neo <- expand_grid(
+  patient = patients,
+  binding = bindings
+) %>%
+  mutate(count = 0)
+
+# Add missing patients to the main summary dataframe
+agg_all_filtered_count <- bind_rows(agg_all_filtered_count, missing_patients_neo)
+
+# Reorder patient factor by total count
+agg_all_filtered_count <- agg_all_filtered_count %>%
+  group_by(patient) %>%
+  mutate(total_count = sum(count)) %>%
+  ungroup() %>%
+  mutate(patient = fct_reorder(patient, total_count))
+
+# Determine the order
+agg_all_filtered_count$binding <- factor(
+  agg_all_filtered_count$binding,
+  levels = c("strong", "medium", "weak", "NA")
+)
+
+# Create the plot
+ggplot(agg_all_filtered_count, aes(x = patient, y = count, fill = binding)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Count of neoantigens per patient",
+    x = "Patient",
+    y = "Neoantigen count",
+    fill = 'Binding affinity'
+  ) +
+  scale_fill_manual(values = c("strong" = "#4DAF4A", "medium" = "#984EA3", "weak" = "#fee08b", "NA" = "gray")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+### Plot binding affinity synchronous condition
+
+```{r}
+# Plot the distribution of IC50 MT with two groups overlaid
+ggplot(synchronous_dcis_idc, aes(x = Best.MT.IC50.Score, fill = group)) +
+  geom_density(alpha = 0.5) + 
+  labs(title = "Distribution of IC50 MT synchronous DCIS vs IDC",
+       x = "IC50 MT",
+       y = "Density", 
+       fill = 'Histology') +
+  scale_fill_manual(values = histology_colors_simple) + 
+  scale_color_manual(values = histology_colors_simple) + 
+  theme_minimal() +
+  theme(legend.position = "top") 
+```
+
+## IC50
+
+### IC50 plot
+
+```{r}
+
+# Plot the distribution of IC50 MT with two groups overlaid
+ggplot(all_neoantigens, aes(x = Best.MT.IC50.Score, fill = type)) +
+  geom_density(alpha = 0.5) +  # Density plot with transparency
+  labs(title = "Distribution of IC50 MT by Group",
+       x = "IC50 MT",
+       y = "Density", 
+       fill = 'Histology') +
+  scale_fill_manual(values = histology_colors) + 
+  scale_color_manual(values = histology_colors) + 
+  theme_minimal() +
+  theme(legend.position = "top") 
+
+# Ridge plot of IC50 
+ggplot(all_neoantigens, aes(x = Best.MT.IC50.Score, y = type, fill = type)) +
+  geom_density_ridges(alpha = 0.6, scale = 1.2) +
+  labs(title = "Distribution of IC50 MT by Group",
+       x = "IC50 MT",
+       y = "Histology",
+       fill = "Histology") +
+  scale_fill_manual(values = histology_colors) +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+# Boxplot for IC50
+ggplot(all_neoantigens, aes(x = type, y = Best.MT.IC50.Score, fill = type)) +
+  geom_boxplot(alpha = 0.6, outlier.shape = NA) +
+  labs(title = "IC50 MT Distribution by Histology Type",
+       x = "Histology",
+       y = "IC50 MT",
+       fill = "Histology") +
+  scale_fill_manual(values = histology_colors) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+### IC50 binding pie chart
+
+```{r}
+# Calculate percentage of each binding category for each patient
+agg_all_filtered_count <- all_neoantigens %>%
+  group_by(sample, binding, type) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  ungroup() 
+
+# Summarize the data to get total counts per binding category
+pie_data_grouped <- agg_all_filtered_count %>%
+  group_by(type, binding) %>%
+  summarise(total = sum(count), .groups = "drop") %>%
+  group_by(type) %>%
+  mutate(
+    percentage = total / sum(total) * 100,
+    label = paste0(binding, " (", round(percentage, 1), "%)")
+  )
+
+# Summarize the data to get total counts per binding category
+pie_data_binding <- agg_all_filtered_count %>%
+  group_by(binding) %>%
+  summarise(total = sum(count), .groups = "drop") %>%
+  mutate(
+    percentage = total / sum(total) * 100,
+    label = paste0(binding, " (", round(percentage, 1), "%)")
+  )
+
+# Determine the order
+pie_data_grouped$binding <- factor(
+  pie_data_grouped$binding,
+  levels = c("strong", "medium", "weak", "NA")
+)
+
+# Create faceted pie charts
+ggplot(pie_data_grouped, aes(x = "", y = percentage, fill = binding)) +
+  geom_bar(width = 1, stat = "identity", color = "white") +
+  coord_polar("y", start = 0) +
+  facet_wrap(~ type) +
+  scale_fill_manual(
+    values = c("strong" = "#4DAF4A", "medium" = "#984EA3", "weak" = "#fee08b", "NA" = "gray")
+  ) +
+  theme_void() +
+  labs(title = " ", 
+       fill = 'Binding') +
+  geom_text(aes(label = label), position = position_stack(vjust = 0.5), size = 1.8, 
+            hjust = 0.6)
+```
+
+## FC
+
+### FC plot all patients
+
+```{r}
+
+# Fold change plot between the three groups
+ggplot(all_neoantigens, aes(x = type, y = FC, fill = type)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.6, width = 0.6) +
+  geom_jitter(width = 0.2, alpha = 0.4, size = 1) +
+  labs(
+    title = "Fold Change (FC) Across Tumor Types",
+    x = "Histology",
+    y = "FC"
+  ) +
+  scale_fill_manual(values = histology_colors) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# Ridge plot
+ggplot(all_neoantigens, aes(x = FC, y = type, fill = type)) +
+  geom_density_ridges(alpha = 0.6, scale = 1.2) +
+  labs(title = "Distribution of FC MT by Group",
+       x = "FC MT",
+       y = "Histology",
+       fill = "Histology") +
+  scale_fill_manual(values = histology_colors) +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+# Select low FC values
+FC_select <- all_neoantigens[all_neoantigens$FC < 3, ]
+FC_select <- FC_select[!is.na(FC_select$type), ]
+
+# Ridge plot
+ggplot(FC_select, aes(x = FC, y = type, fill = type)) +
+  geom_density_ridges(alpha = 0.6, scale = 1.2) +
+  labs(title = "Distribution of FC MT by Group",
+       x = "FC",
+       y = "Histology",
+       fill = "Histology") +
+  scale_fill_manual(values = histology_colors) +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+```
+
+### FC plot synchronous condition
+
+```{r}
+
+# Fold change plot within the synchronous DCIS and IDC groups
+ggplot(synchronous_dcis_idc, aes(x = group, y = FC, fill = group)) +  
+  geom_boxplot(outlier.shape = NA, alpha = 0.6, width = 0.6) +
+  geom_jitter(width = 0.2, alpha = 0.4, size = 1) +
+  labs(
+    title = "Fold Change (FC) Across Tumor Types",
+    x = "Histology",
+    y = "FC"
+  ) +
+  scale_fill_manual(values = histology_colors_simple) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# Ridge plot
+ggplot(synchronous_dcis_idc, aes(x = FC, y = group, fill = group)) +
+  geom_density_ridges(alpha = 0.6, scale = 1.2) +
+  labs(title = "Distribution of FC MT by Group",
+       x = "FC",
+       y = "Histology",
+       fill = "Histology") +
+  scale_fill_manual(values = histology_colors_simple) +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+# Select low FC values
+FC_select_synch <- synchronous_dcis_idc[synchronous_dcis_idc$FC < 3, ]
+FC_select_synch <- FC_select_synch[!is.na(FC_select_synch$type), ]
+
+# Ridge plot
+ggplot(FC_select_synch, aes(x = FC, y = group, fill = group)) +
+  geom_density_ridges(alpha = 0.6, scale = 1.2) +
+  labs(title = "Distribution of FC MT by Group",
+       x = "FC",
+       y = "Histology",
+       fill = "Histology") +
+  scale_fill_manual(values = histology_colors_simple) +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+```
+
+## Gene expression
+
+### Gene expression plot
+
+```{r}
+
+# Ridge plot FPKM
+ggplot(all_neoantigens, aes(x = FPKM, y = type, fill = type)) +
+  geom_density_ridges(alpha = 0.6, scale = 1.2) +
+  xlim(0,100)+
+  labs(title = "Distribution of FPKM MT by Group",
+       x = "FPKM",
+       y = "Histology",
+       fill = "Histology") +
+  scale_fill_manual(values = histology_colors) +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+#FPKM jitterplot 
+ggplot(all_neoantigens, aes(x = type, y = (FPKM), color = type)) +
+  geom_jitter(width = 0.2, alpha = 0.6, size = 0.6) +  
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black") +
+  labs(
+    title = "FPKM Expression",
+    x = " ",
+    y = "FPKM",
+    color = "Histology"
+  ) +
+  scale_color_manual(values = histology_colors) +
+  theme_minimal()
+
+    
+#FPKM synchronous samples jitterplot 
+ggplot(synchronous_dcis_idc, aes(x = group, y = FPKM, color = group)) +
+  geom_jitter(width = 0.2, alpha = 0.6, size = 0.6) +  
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black") +
+  labs(
+    title = "FPKM Expression: Synchronous DCIS vs IDC",
+    x = "Histology",
+    y = "FPKM",
+    color = "Histology"
+  ) +
+  scale_color_manual(values = histology_colors_simple) +
+  theme_minimal()
+
+
+# Plot the distribution of IC50 MT with two groups overlaid
+ggplot(synchronous_dcis_idc, aes(x = FPKM, y = group, fill = group)) +
+  geom_density_ridges(alpha = 0.6, scale = 1.2) +
+  xlim(0,100)+
+  labs(
+    title = "Distribution of FPKM: Synchronous DCIS vs IDC",
+    x = "FPKM",
+    y = "Histology",
+    fill = "Histology"
+  ) +
+  scale_fill_manual(values = histology_colors_simple) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+
+```
+
+## Mutation types
+
+### Plot mutation types per patient
+
+```{r}
+
+# Calculate percentage of each binding category for each patient
+mutation_type_count <- all_neoantigens %>%
+  group_by(patient, Variant.Type) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  ungroup() 
+
+# Define patients and binding levels
+patients <- c("DCIS_7389", "DCIS_7419", "IDC_7419", "DCIS_7416")
+variant_type <- c('FS', 'FS', 'FS', 'FS')
+count <- c(0, 0, 0, 0)
+total <- c(0, 0, 0, 0)
+
+# Create all combinations
+missing_patients_neo <- data.frame(
+  patient = patients,
+  Variant.Type = variant_type,
+  count = count,
+  stringsAsFactors = FALSE
+)
+
+# Merge with patients without predicted neoantigens
+mutation_type_count <- rbind(mutation_type_count, missing_patients_neo)
+
+# Reorder patient factor by total count
+mutation_type_count <- mutation_type_count %>%
+  group_by(patient) %>%
+  mutate(total_count = sum(count)) %>%
+  ungroup() %>%
+  mutate(patient = fct_reorder(patient, total_count))
+
+# Plot mutation types per patient
+ggplot(mutation_type_count, aes(x = patient, y = count, fill = Variant.Type)) +
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(palette = "YlGnBu")+
+  labs(
+    title = "Count of neoantigens per patient",
+    x = "Patient",
+    y = "Neoantigen count",
+    fill = 'Mutation variant') +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+### Pie chart mutation types
+
+```{r}
+
+# Summarize total counts per Variant Type
+mutation_type_summary <- mutation_type_count %>%
+  group_by(Variant.Type) %>%
+  summarise(total = sum(count)) %>%
+  mutate(percent = total / sum(total) * 100,
+         label = paste0(Variant.Type, "\n", round(percent, 1), "%"))
+
+# Plot pie chart
+ggplot(mutation_type_summary, aes(x = "", y = total, fill = Variant.Type)) +
+  geom_bar(width = 1, stat = "identity") +
+  scale_fill_brewer(palette = "YlGnBu")+
+  coord_polar(theta = "y") +
+  labs(title = "Mutation Variant Distribution (All Patients)", fill = "Variant Type") +
+  theme_void()
+
+```
+
+### Bar chart mutation types
+
+```{r}
+
+# Summarize counts
+mutation_type_summary <- mutation_type_summary %>%
+  mutate(Variant.Type = case_when(
+    Variant.Type == "FS" ~ "Frame Shift",
+    Variant.Type == "inframe_ins" ~ "Inframe Insertion",
+    Variant.Type == "missense" ~ "Missense",
+    TRUE ~ Variant.Type  # Keep all other values unchanged
+  ))
+
+# Plot bar chart with log10 scale on y-axis
+ggplot(mutation_type_summary, aes(x = reorder(Variant.Type, -total), y = total, fill = Variant.Type)) +
+  geom_bar(stat = "identity") +
+  scale_y_log10() +
+  scale_fill_brewer(palette = "YlGnBu") +
+  labs(
+    title = "Mutation Variant Distribution (All Patients)",
+    x = "Variant Type",
+    y = "count",
+    fill = "Variant Type"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Neoantigen count
+
+### Neoantigen count all conditions
+
+```{r}
+
+# Calculate percentage of each binding category for each patient
+agg_all_filtered_count <- all_neoantigens %>%
+  group_by(sample, type) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  ungroup()
+
+# Define patients and binding levels
+patients <- c("DCIS_7389", "DCIS_7419", "IDC_7419", "DCIS_7416")
+type <- c('DCIS & IDC (n=20)', 'DCIS & IDC (n=20)', 'DCIS & IDC (n=20)', 'pure DCIS (n=7)')
+count <- c(0, 0, 0, 0)
+  
+# Create all combinations
+missing_patients_neo <- data.frame(
+  sample = patients,
+  type = type,
+  count = count,
+  stringsAsFactors = FALSE
+)
+
+# Merge with patients without predicted neoantigens
+agg_all_filtered_count <- rbind(agg_all_filtered_count, missing_patients_neo)
+
+# Calculate median
+median(agg_all_filtered_count$count)
+
+# Define the order of the x-axis
+agg_all_filtered_count$type <- factor(
+  agg_all_filtered_count$type,
+  levels = c("pure DCIS (n=7)", "DCIS & IDC (n=20)", "pure IDC (n=6)")
+)
+
+# Create the jitter plot, faceted by group (DCIS vs IDC)
+ggplot(agg_all_filtered_count, aes(x = type, y = count, color = type)) +
+  geom_jitter(size = 3, width = 0.2, alpha = 1) +  
+  geom_boxplot(alpha = 0, outlier.shape = NA, color = "black", width = 0.5) + 
+  labs(title = "Count of Neoantigens ",
+       x = "Histology",
+       y = "Count of Neoantigens") +
+  scale_color_manual(values = histology_colors) +  
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), 
+        legend.position = 'none') 
+
+```
+
+### Neoantigen count synchronous pairs
+
+```{r}
+
+# Calculate percentage of each binding category for each patient
+agg_all_filtered_count_synchronous <- synchronous_dcis_idc %>%
+  group_by(sample, group, patientID) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  ungroup()
+
+# Define patients and binding levels
+sample <- c('HX7389_DCIS', 'HX7419_DCIS', 'HX7419_IDC')
+group <- c('DCIS', 'DCIS', 'IDC')
+patientID <- c("7389", "7419", "7419")
+count <- c(0, 0, 0)
+  
+# Create all combinations
+missing_patients_neo <- data.frame(
+  sample = sample,
+  group = group,
+  patientID = patientID,
+  count = count,
+  stringsAsFactors = FALSE
+)
+
+# Merge with patients without predicted neoantigens
+agg_all_filtered_count_synchronous <- rbind(agg_all_filtered_count_synchronous, missing_patients_neo)
+
+
+# Create the jitter plot, faceted by group (DCIS vs IDC)
+ggplot(agg_all_filtered_count_synchronous, aes(x = group, y = count, color = group)) +
+  geom_jitter(size = 3, width = 0.2, alpha = 1) +  
+  geom_boxplot(alpha = 0, outlier.shape = NA, color = "black", width = 0.5) + 
+  labs(title = "Count of Neoepitopes Synchronous DCIS vs IDC ",
+       x = "Histology",
+       y = "Count of Neoantigens") +
+  scale_color_manual(values = histology_colors_simple) +  
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), 
+        legend.position = 'none') 
+
+# Violin plot 
+ggplot(agg_all_filtered_count_synchronous, aes(x = group, y = count, fill=group)) + 
+  geom_violin(alpha = 0.5, trim = FALSE, color = NA) +  
+  geom_point(color = "black", size = 2, alpha = 1) + 
+  geom_line(aes(group = patientID), color = "gray40", size = 0.5, alpha = 0.6) +  
+  stat_summary(
+    fun.data = function(y) {
+      data.frame(
+        y = median(y),
+        ymin = quantile(y, 0.25),
+        ymax = quantile(y, 0.75)
+      )
+    },
+    geom = "pointrange", color = "#D1495B", size = 0.4  # IQR and median
+  ) + 
+  scale_fill_manual(values = histology_colors_simple) +
+  labs(
+    title = "Synchronous DCIS vs. IDC Neoantigen Count",
+    x = NULL,
+    y = "# neoantigens per patient"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    axis.text.x = element_text(size = 11),
+    axis.text.y = element_text(size = 11)
+  )
+
+# Reshape the data to wide format
+wide_data <- agg_all_filtered_count_synchronous %>%
+  dplyr::select(patientID, group, count) %>%
+  tidyr::pivot_wider(names_from = group, values_from = count)
+
+# Scatterplot synchronous DCIS vs IDC pairs
+ggplot(wide_data, aes(x = DCIS, y = IDC)) +
+  geom_point(color = "steelblue", size = 3) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +
+  labs(
+    title = "Synchronous DCIS vs IDC Neoantigen Count per Patient",
+    x = "DCIS Count",
+    y = "IDC Count"
+  ) +
+  theme_minimal()
+```
+
+### Neoantigens per mutation synchronous
+
+```{r}
+
+# Create the data frame
+synchronous_data <- data.frame(
+  PatientID = c("0169", "0169", "0193", "0193", "0332", "0332", "0355", "0355", "7402", "7402"),
+  Tissue = c("DCIS", "IDC", "DCIS", "IDC", "DCIS", "IDC", "DCIS", "IDC", "DCIS", "IDC"),
+  X = c(2138, 62, 53, 102, 1809, 8208, 2711, 6028, 12555, 349), # neoantigens
+  Y = c(1568, 609, 582, 234, 793, 507, 760, 1044, 1244, 300) # mutations
+)
+
+# Calculate the ratio of X to Y
+synchronous_data$neo_per_mut <- synchronous_data$X / synchronous_data$Y
+
+# Calculate statistics
+median(synchronous_data$neo_per_mut)
+min(synchronous_data$neo_per_mut)
+max(synchronous_data$neo_per_mut)
+```
+
+## Tests and statistics
+
+```{r}
+
+# Perform Kruskal-Wallis test to compare counts across the three groups
+#kruskal.test(count ~ type, data = agg_all_filtered_count)
+
+# Obtain count statistics 
+agg_all_filtered_count_statistics <- agg_all_filtered_count %>%
+  group_by(type) %>%
+  summarize(median_count = median(count, na.rm = TRUE), 
+            min_count = min(count, na.rm = TRUE), 
+            max_count = max(count, na.rm = TRUE))
+
+# Get samples with both synchronous samples
+samples_with_both <- c('HX0169_DCIS', 'HX0193_DCIS', 'HX0332_DCIS', 'HX0355_DCIS', 'HX7419_DCIS', 'HX7402_DCIS', 'HX0169_IDC', 'HX0193_IDC', 'HX0332_IDC', 'HX0355_IDC', 'HX7419_IDC', 'HX7402_IDC')
+
+# Obtain synchronous samples count information
+agg_all_filtered_count_synchronous <- agg_all_filtered_count[agg_all_filtered_count$sample %in% samples_with_both, ]
+
+# Add group column
+agg_all_filtered_count_synchronous <- agg_all_filtered_count_synchronous %>%
+  mutate(group = sub(".*_", "", sample))
+
+# Test within synchronous samples
+#wilcox.test(count ~ group, data = agg_all_filtered_count_synchronous, paired = TRUE)
+
+```
+
+## High affinity neoantigens
+
+```{r}
+
+# Obtain the percentage of high affinity neoantigens
+high_affinity <- all_neoantigens %>%
+  group_by(sample, type) %>%
+  summarise(
+    total = n(),
+    strong_count = sum(binding == "strong"),
+    percent_strong = (strong_count / total) 
+  )
+
+# Define the order of the x-axis
+high_affinity$type <- factor(
+  high_affinity$type,
+  levels = c("pure DCIS (n=7)", "DCIS & IDC (n=20)", "pure IDC (n=6)")
+)
+
+# Create the jitter plot, faceted by group (DCIS vs IDC)
+ggplot(high_affinity, aes(x = type, y = percent_strong, color = type)) +
+  geom_jitter(size = 3, width = 0.2, alpha = 1) +  
+  geom_boxplot(alpha = 0, outlier.shape = NA, color = "black", width = 0.5) + 
+  labs(title = "Proportion Strong Binding Neoantigens ",
+       x = "Histology",
+       y = "Proportion Strong Binding") +
+  scale_color_manual(values = histology_colors) +  
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), 
+        legend.position = 'none') 
+
+# Create the new rows as a tibble
+new_rows_missing_neo <- tibble::tibble(
+  sample = c("HX7389_DCIS", "HX7419_DCIS", "HX7419_IDC", "HX7416_DCIS"),
+  type = c("DCIS & IDC (n=20)", "DCIS & IDC (n=20)", "DCIS & IDC (n=20)", "DCIS (n=7)"),
+  total = c(0, 0, 0, 0),
+  strong_count = c(0, 0, 0, 0),
+  percent_strong = c(NA, NA, NA, NA)
+)
+
+# Add to existing tibble
+high_affinity <- bind_rows(high_affinity, new_rows_missing_neo)
+
+# Test proportion strong binding antigens
+#kruskal.test(percent_strong ~ type, data = high_affinity)
+
+# Now between the synchronous groups
+high_affinity <- high_affinity %>%
+  mutate(ID = sub(".*?(\\d{4}).*", "\\1", sample))
+percent_strong_synchronous <- high_affinity[high_affinity$ID %in% patients_with_both, ]
+percent_strong_synchronous <- percent_strong_synchronous %>%
+  mutate(group = sub(".*_", "", sample))
+#wilcox.test(percent_strong ~ group, data = percent_strong_synchronous, paired = TRUE)
+
+```
+
+## Binding affinity vs RNA expression
+
+```{r}
+
+# Determine order of binding
+all_neoantigens$binding <- factor(
+  all_neoantigens$binding,
+  levels = c("strong", "medium", "weak", "NA")
+)
+
+# Scatter plot of RNA expression vs binding categories with jitter
+ggplot(all_neoantigens, aes(x = FPKM, y = Best.MT.IC50.Score, color = binding)) +
+  geom_jitter(alpha = 0.4, width = 0.2) +  
+  labs(title = "RNA Expression Levels vs Binding ",
+       x = "FPKM ",
+       y = "IC50 MT", 
+       color = 'Binding') +
+  scale_color_manual(values = c("strong" = "#4DAF4A", "medium" = "#984EA3", "weak" = "#fee08b", "NA" = "gray")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  
+
+# Spearman correlation test between expression and IC50
+cor.test(all_neoantigens$FPKM, all_neoantigens$Best.MT.IC50.Score, method = "spearman")
+
+```
+
+## Genes
+
+### Generating most neoantigens
+
+```{r}
+
+# Count the occurrences of each gene
+agg_gene_count <- all_neoantigens %>%
+  group_by(Gene.Name) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  arrange(desc(count)) 
+
+# Select top 20 genes
+top_genes <- agg_gene_count %>% slice_max(order_by = count, n = 30)
+
+# Plot with green gradient
+ggplot(top_genes, aes(x = fct_reorder(Gene.Name, count), y = count)) +
+  geom_bar(stat = "identity", fill = "#1f77b4") +  # Set single color here
+  geom_text(aes(label = count), 
+            hjust = -0.1, 
+            size = 2) +
+  coord_flip() +
+  labs(
+    title = "Top 30 Genes with Most Neoantigens",
+    x = "Gene",
+    y = "Neoantigen Count"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 1),
+    legend.position = 'none'
+  ) +
+  expand_limits(y = max(top_genes$count) * 1.1)  
+
+```
+
+### Plot most occuring genes producing neoantigens
+
+```{r}
+
+# Obtain genes with most counts
+most_genes <- all_neoantigens %>%
+  group_by(Gene.Name) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  arrange(desc(count)) 
+
+# Count the occurrences of each gene
+agg_gene_count <- all_neoantigens %>%
+  group_by(Gene.Name, type) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  arrange(desc(count)) 
+
+# Select only pure DCIS and pure IDC
+agg_gene_count <- agg_gene_count[agg_gene_count$type %in% c('pure DCIS (n=7)', 'pure IDC (n=6)'), ]
+
+# Count the number of unique groups for each gene
+genes_in_one_group <- agg_gene_count %>%
+  group_by(Gene.Name) %>%
+  summarise(unique_groups = n_distinct(type), .groups = 'drop') %>%
+  filter(unique_groups == 1)
+
+# Filter the original data frame to select only these genes
+genes_in_one_group_df <- agg_gene_count %>%
+  filter(Gene.Name %in% genes_in_one_group$Gene.Name)
+
+# Get the top most occuring genes
+agg_gene_names <- agg_gene_count %>% head(40)
+agg_gene_names <- as.data.frame(agg_gene_names)
+agg_gene_names <- agg_gene_names %>% pull(Gene.Name) %>% unique()
+
+# Select
+agg_gene_count_select <- agg_gene_count[agg_gene_count$Gene.Name %in% agg_gene_names, ]
+
+# Pick colors viridis
+vir_col <- viridis(2, option = 'D')
+color =  c("#1f77b4", "#d73027")
+
+# Adjust the count so that DCIS goes to the left and IDC goes to the right
+agg_gene_count_select <- agg_gene_count_select %>%
+  mutate(count_adjusted = ifelse(type == "pure DCIS (n=7)", -count, count))
+
+# Plot the stacked bar chart with adjusted counts
+ggplot(agg_gene_count_select, aes(x = count_adjusted, y = reorder(Gene.Name, count), fill = type)) + 
+  geom_bar(stat = "identity", alpha = 1) + 
+  scale_fill_manual(values = color) + 
+  labs(title = "Most Occurring Genes Producing Neoantigens", 
+       x = "Neoantigen Count", 
+       y = "Gene", 
+       fill = 'Histology') + 
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+        axis.text.y = element_text(size = 6), 
+        legend.position = 'top') +
+  scale_x_continuous(labels = abs) 
+
+```
+
+### Percentage of patients with genes creating neoantigens
+
+```{r}
+
+# Step 1: Calculate the total number of patients (distinct samples) per group
+total_patients_per_group <- all_neoantigens %>%
+  group_by(group) %>%
+  summarise(total_patients = n_distinct(sample), .groups = 'drop')
+
+# Step 2: Count the number of distinct patients per gene and group
+gene_patient_count_per_group <- all_neoantigens %>%
+  group_by(Gene.Name, group) %>%
+  summarise(patients_with_neoantigen = n_distinct(sample), .groups = 'drop')
+
+# Step 3: Merge the total patient count with the gene_patient_count_per_group to calculate the percentage
+gene_patient_count_per_group <- gene_patient_count_per_group %>%
+  left_join(total_patients_per_group, by = "group") %>%
+  mutate(percentage_patients = (patients_with_neoantigen / total_patients) * 100) %>%
+  arrange(group, desc(percentage_patients))
+
+# Step 4: Select the top genes by percentage (e.g., top 40 genes for each group)
+top_genes_by_percentage <- gene_patient_count_per_group %>%
+  group_by(group) %>%
+  top_n(10, percentage_patients) %>%
+  ungroup()
+
+# Determine colors
+color =  c("#1f77b4", "#d73027")
+
+# Adjust the count so that DCIS goes to the left and IDC goes to the right
+top_genes_by_percentage <- top_genes_by_percentage %>%
+  mutate(percentage_patients_adjusted = ifelse(group == "DCIS", -percentage_patients, percentage_patients))
+
+# Plot the stacked bar chart with adjusted counts
+ggplot(top_genes_by_percentage, aes(x = percentage_patients_adjusted, y = reorder(Gene.Name, percentage_patients_adjusted), fill = group)) + 
+  geom_bar(stat = "identity", alpha = 1) + 
+  scale_fill_manual(values = color) + 
+  labs(title = "Most Occurring Genes Producing Neoantigens", 
+       x = "Percentage (%)", 
+       y = "Gene", 
+       fill = 'Histology') + 
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+        axis.text.y = element_text(size = 6), 
+        legend.position = 'top') +
+  scale_x_continuous(labels = abs) 
+
+```
+
+## HLA alleles
+
+### HLA count plot
+
+```{r}
+
+# Remove the : from HLA.Allele so they all have the same format
+all_neoantigens <- all_neoantigens %>%
+  mutate(HLA.Allele = gsub(":", "", HLA.Allele))
+
+# Filter and count binding epitopes per allele where IC50_MT < 500
+count_hla_alleles <- all_neoantigens %>%
+  group_by(HLA.Allele) %>% 
+  summarize(count_hla = n()) %>% 
+  arrange(desc(count_hla)) %>%  
+  head(20)  
+
+# Create plot most occuring HLA alleles
+ggplot(count_hla_alleles %>% arrange(desc(count_hla)),  
+       aes(x = reorder(HLA.Allele, count_hla), y = count_hla, fill = count_hla)) +   
+  geom_bar(stat = "identity") + 
+  labs(title = "Number of Neoantigens per HLA Allele",        
+       x = "HLA Allele",        
+       y = "Count of Neoantigens") +   
+  theme_minimal() +   
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = 'none') +    
+  coord_flip() +  
+  scale_fill_gradient(low = "lightblue", high = "darkblue")  
+
+# Total number of unique samples
+n_samples <- all_neoantigens %>%
+  distinct(sample) %>%
+  nrow()
+
+# Calculate percentage of samples per allele
+allele_sample_coverage <- all_neoantigens %>%
+  distinct(HLA.Allele, sample) %>%                            
+  group_by(HLA.Allele) %>%
+  summarize(n_samples_with_allele = n()) %>%
+  mutate(percent_samples = (n_samples_with_allele / n_samples) * 100) %>%
+  arrange(desc(percent_samples)) %>%
+  head(20)
+
+# Get the top 20 alleles creating neoantigens in most patients
+top_alleles_neo <- allele_sample_coverage$HLA.Allele
+
+# Create plot most occuring HLA alleles
+ggplot(allele_sample_coverage %>% arrange(desc(percent_samples)),  
+       aes(x = reorder(HLA.Allele, percent_samples), y = percent_samples, fill = percent_samples)) +   
+  geom_bar(stat = "identity") + 
+  labs(title = "Percentage of Patients with HLA-allele",        
+       x = "HLA Allele",        
+       y = "Percentage of Patients") +   
+  theme_minimal() +   
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = 'none') +    
+  coord_flip() +  
+  scale_fill_gradient(low = "lightblue", high = "darkblue")  
+
+# First, get total number of samples per group
+samples_per_group <- all_neoantigens %>%
+  distinct(sample, group) %>%
+  count(group, name = "total_samples")
+
+# Now calculate number of samples with each allele per group
+allele_sample_coverage_by_group <- all_neoantigens %>%
+  distinct(HLA.Allele, sample, group) %>%
+  group_by(HLA.Allele, group) %>%
+  summarize(n_samples_with_allele = n(), .groups = "drop") %>%
+  left_join(samples_per_group, by = "group") %>%
+  mutate(percent_samples_in_group = (n_samples_with_allele / total_samples)) %>%
+  arrange(desc(percent_samples_in_group))
+
+# Prepare top 20 alleles by overall presence
+top20_alleles <- allele_sample_coverage_by_group %>%
+  group_by(HLA.Allele) %>%
+  summarize(max_percent = max(percent_samples_in_group)) %>%
+  top_n(20, max_percent)
+
+# Filter to top 20
+plot_data <- allele_sample_coverage_by_group %>%
+  semi_join(top20_alleles, by = "HLA.Allele") %>%
+  mutate(
+    percent_plot = ifelse(group == "DCIS", -percent_samples_in_group, percent_samples_in_group)
+  )
+
+# Plot per sample and histology the fractions
+ggplot(plot_data, aes(x = reorder(HLA.Allele, abs(percent_plot)), y = percent_plot, fill = group)) +
+  geom_col(width = 0.7) +
+  coord_flip() +
+  labs(
+    x = "HLA Allele",
+    y = "Percentage (%) of Samples",
+    title = "Top 20 HLA Alleles per Sample and Histology", 
+    fill = 'Histology'
+  ) +
+  scale_y_continuous(
+  labels = function(x) scales::percent(abs(x), accuracy = 1),
+    breaks = seq(-1, 1, 0.2)
+  ) +
+  scale_fill_manual(values = histology_colors_simple) +
+  theme_minimal()
+
+# Get unique values
+types <- unique(all_neoantigens$type)
+
+# Step 1: Create all combinations
+complete_combos <- expand_grid(HLA.Allele = top_alleles_neo, type = types)
+
+# Step 2: Summarize your original data
+allele_sample_coverage_per_type <- all_neoantigens %>%
+  distinct(HLA.Allele, sample, type) %>%
+  group_by(HLA.Allele, type) %>%
+  summarize(n_samples_with_allele = n(), .groups = "drop")
+
+# Step 3: Join and fill missing combinations with 0
+allele_sample_coverage_per_type <- complete_combos %>%
+  left_join(allele_sample_coverage_per_type, by = c("HLA.Allele", "type")) %>%
+  mutate(n_samples_with_allele = replace_na(n_samples_with_allele, 0),
+         percent_samples = (n_samples_with_allele / n_samples) * 100) %>%
+  arrange(desc(percent_samples))
+
+# Per type plot
+ggplot(allele_sample_coverage_per_type, aes(x = HLA.Allele, y = percent_samples, fill = type)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  labs(
+    title = "Sample Coverage per HLA Allele and Type",
+    x = "HLA Allele",
+    y = "Percent of Samples",
+    fill = "Histology"
+  ) +
+  scale_fill_manual(values = histology_colors
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Peptide length
+
+```{r}
+
+# Plot the count of Peptide_Length for each Binding Group
+ggplot(all_neoantigens, aes(x = Peptide.Length, fill = binding)) +
+  geom_bar(position = "stack") +  # Bar plot with dodged bars for binding groups
+  labs(title = "Count of Neoantigen Length per Binding Group",
+       x = "Peptide Length",
+       y = "Count of Neoantigens", 
+       fill = 'Binding') +
+  theme_minimal() +
+  scale_fill_manual(values = c("strong" = "#4DAF4A", "medium" = "#984EA3", "weak" = "#fee08b", "NA" = "gray"))
+
+# Calculate the count of peptide length
+peptide_count <- all_neoantigens %>%
+  group_by(Peptide.Length) %>%
+  summarize(peptide_count = n(), 
+            percentage = peptide_count / 62531 * 100)
+
+# Calculate the count of peptide length strong binding
+strong_binding_count <- all_neoantigens[all_neoantigens$binding == 'strong', ]
+peptide_count <- strong_binding_count %>%
+  group_by(Peptide.Length) %>%
+  summarize(peptide_count = n(), 
+            percentage = peptide_count / 13934 * 100)
+
+```
+
+## CSiN score
+
+### CSiN all conditions
+
+```{r}
+
+# Step 2: Count how many neoantigens per mutation (i.e., mutation load)
+mutation_summary <- all_neoantigens %>%
+  group_by(sample, mutation_id, type, group, patientID) %>%
+  summarise(
+    neoantigen_load = n(),         
+    VAF = unique(Tumor.DNA.VAF),             
+    .groups = "drop"
+  )
+
+# Step 3: Calculate CSiN per sample
+csin_scores <- mutation_summary %>%
+  group_by(sample, type, group, patientID) %>%
+  summarise(
+    numerator = sum(neoantigen_load * VAF),
+    denominator = sum(VAF),
+    CSiN = numerator / denominator
+  )
+
+# Calculate CSiN score statistics
+csin_scores_statistics <- csin_scores %>%
+  group_by(type) %>%
+  summarize(median = median(CSiN), 
+            min = min(CSiN), 
+            max = max(CSiN))
+
+
+# Create the jitter plot, faceted by group (DCIS vs IDC)
+ggplot(csin_scores, aes(x = type, y = CSiN, color = type)) +
+  geom_jitter(size = 3, width = 0.2, alpha = 1) +  
+  geom_boxplot(alpha = 0, outlier.shape = NA, color = "black", width = 0.5) + 
+  labs(title = "CSiN scores ",
+       x = "Histology",
+       y = "CSiN Score") +
+  scale_color_manual(values = histology_colors) +  
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), 
+        legend.position = 'none') 
+
+# Create a density plot
+ggplot(csin_scores, aes(x = CSiN, fill = type)) +
+  geom_density(alpha = 0.4) +
+  theme_minimal() +
+  labs(title = "Distribution of CSiN Scores per Histology", 
+       fill = 'Histology', 
+       x = 'CSiN score') + 
+  scale_fill_manual(values = histology_colors
+  )
+
+```
+
+### CSiN synchronous samples
+
+```{r}
+
+# CSiN for only synchronous samples
+csin_scores_synch <- csin_scores[csin_scores$patientID %in% patients_with_both, ]
+
+# Calculate CSiN score statistics
+csin_scores_stats_synch <- csin_scores_synch %>%
+  group_by(group) %>%
+  summarize(median = median(CSiN), 
+            min = min(CSiN), 
+            max = max(CSiN))
+
+# Get only the scores for the synchronous DCIS & IDC
+csin_scores_synchronous <- csin_scores[csin_scores$patientID %in% patients_with_both, ]
+
+# Create a density plot
+ggplot(csin_scores_synchronous, aes(x = CSiN, fill = group)) +
+  geom_density(alpha = 0.4) +
+  theme_minimal() +
+  labs(title = "Distribution of CSiN Scores per Histology", 
+       fill = 'Histology', 
+       x = 'CSiN score') + 
+  scale_fill_manual(values = histology_colors_simple)
+
+# test all samples
+#kruskal.test(CSiN ~ group, data = csin_scores)
+
+# Test synchronous samples
+#wilcox.test(CSiN ~ group, data = csin_scores_synchronous, paired = TRUE)
+
+```
+
+## Shared neoantigens
+
+### Shared across samples
+
+```{r}
+
+# Search for shared antigens
+shared_peptides <- all_neoantigens %>%
+  dplyr::select(MT.Epitope.Seq, sample) %>%
+  distinct() %>%             
+  group_by(MT.Epitope.Seq) %>%
+  summarise(
+    n_samples = n(),
+    samples = paste(unique(sample), collapse = ", "),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(n_samples))   
+
+# Only obtain shared neoantigens
+shared_across_samples <- shared_peptides %>%
+  filter(n_samples > 1)  # only peptides seen in >1 sample
+
+# See total unique neoantigens predicted
+length(unique(all_neoantigens$MT.Epitope.Seq))
+
+# See if there are similar peptides per patient produced by multiple mutations
+peptide_by_mutation <- all_neoantigens %>%
+  dplyr::select(sample, MT.Epitope.Seq, mutation_id) %>%
+  distinct()
+
+# Get info on shared peptides
+shared_peptides <- shared_across_samples$MT.Epitope.Seq
+shared_peptides_info <- all_neoantigens[all_neoantigens$MT.Epitope.Seq %in% shared_peptides, ]
+
+# Select columns I'm interested in
+shared_peptides_info1 <- shared_peptides_info[, c(
+  'MT.Epitope.Seq', 
+  'Gene.Name',
+  "Median.MT.IC50.Score",
+  "FC",
+  "Gene.Expression",
+  "Tumor.DNA.VAF",
+  "Best.MT.IC50.Score",
+  "Corresponding.WT.IC50.Score",
+  "binding",
+  "patientID",
+  "type",
+  "group",
+  "HLA.Allele",
+  "Peptide.Length",
+  'FPKM'
+)]
+
+```
+
+### Shared within samples
+
+```{r}
+# Shared within samples
+redundant_peptides <- peptide_by_mutation %>%
+  group_by(sample, MT.Epitope.Seq) %>%
+  summarise(
+    n_mutations = n_distinct(mutation_id),
+    mutations = paste(unique(mutation_id), collapse = "; "),
+    .groups = "drop"
+  ) %>%
+  filter(n_mutations > 1)  # only peptides from multiple mutations
+
+```
+
+## Correlation
+
+```{r}
+# Create peptide matrix
+peptide_matrix <- all_neoantigens %>%   
+  distinct(sample, Best.MT.IC50.Score) %>%    
+  mutate(present = 1) %>%   
+  pivot_wider(names_from = sample, values_from = present, values_fill = list(present = 0)) %>% 
+  mutate(Best.Peptide = as.character(Best.MT.IC50.Score)) %>%  # Ensure it's a character before rownames
+  column_to_rownames(var = "Best.Peptide")  # Ensure column name is quoted
+
+# Compute correlation matrix
+cor_matrix <- cor(peptide_matrix, method = "pearson")  # Compute Pearson correlation
+
+# Create heatmap
+pheatmap(cor_matrix, 
+         color = colorRampPalette(c("blue", "white", "red"))(50), 
+         main = "Correlation of Samples Based on Shared Neoantigens",
+         cluster_rows = TRUE, 
+         cluster_cols = TRUE)
+
+```
+
+## TMB
+
+### Load TMB data
+
+```{r}
+# Path for when working on macbook
+file_path_mac_TMB <- c("/Users/sannepetersen/Documents/Bioinformatics and systems biology/NKI Bioinformatics/Bestanden/TMB.txt")
+
+# Load combined all df
+TMB <- read_tsv(file_path_mac_TMB, show_col_types = FALSE)
+TMB <- TMB %>%
+  mutate(
+    sample = sub("^.*_(\\d+)$", "\\1", Tumor_Sample_Barcode)
+  )
+```
+
+### Calculate the neoantigen burden
+
+```{r}
+
+# Step 2: Count how many neoantigens per mutation (i.e., mutation load)
+neoantigen_burden <- all_neoantigens %>%
+  group_by(sample, type, group) %>%
+  summarise(
+    neoantigen_burden = n(),        
+    .groups = "drop"
+  )
+
+# Get patientID
+neoantigen_burden <- neoantigen_burden %>%
+  mutate(
+    patientID = sub("^HX(\\d+).*", "\\1", sample)  
+  )
+
+# See which patients have no predicted neoantigens
+patients_mutations <- unique(TMB$sample)
+patients_neoantigens <- unique(neoantigen_burden$patientID)
+patients_no_neo <- setdiff(patients_mutations, patients_neoantigens)
+
+# Create the new rows as a tibble
+new_rows_missing_neo <- tibble::tibble(
+  sample = c("HX7389_DCIS", "HX7419_DCIS", "HX7419_IDC", "HX7416_DCIS"),
+  type = c("DCIS & IDC (n=20)", "DCIS & IDC (n=20)", "DCIS & IDC (n=20)", "DCIS (n=7)"),
+  group = c("DCIS", "DCIS", "IDC", "DCIS"),
+  neoantigen_burden = c(0, 0, 0, 0),
+  patientID = c("7389", "7419", "7419", "7416")
+)
+
+# Add to existing tibble
+neoantigen_burden <- bind_rows(neoantigen_burden, new_rows_missing_neo)
+```
+
+### Neoantigen load vs TMB
+
+```{r}
+# Merge the two dataframes by sample name
+burden_vs_load <- merge(
+  neoantigen_burden,
+  TMB,
+  by.x = c("patientID", "group"),
+  by.y = c("sample", "Group")
+)
+
+# Plot neoantigen burden vs TMB 
+ggplot(burden_vs_load, aes(x = neoantigen_burden, y = total_perMB)) + 
+  geom_point(aes(color = type), size = 3) +
+  scale_color_manual(values = histology_colors) + 
+  geom_smooth(method = "lm", se = TRUE, color = "black", linetype = "dashed", size = 0.4) + 
+  labs(
+    title = "Neoantigen Burden vs Tumor Mutational Burden (TMB)",
+    x = "Neoantigen Burden",
+    y = "TMB (Total per MB)",
+    color = 'Histology'
+  ) +
+  theme_minimal()
+
+# Plot neoantigen burden vs TMB log2 scale
+ggplot(burden_vs_load, aes(x = log2(neoantigen_burden), y = log2(total_perMB))) +
+  # Shaded group ellipses
+  geom_mark_ellipse(aes(group = type, fill = type), alpha = 0.15, color = NA, show.legend = FALSE) +
+  
+  # Points
+  geom_point(aes(color = type), size = 3) +
+  
+  # Regression line
+  geom_smooth(method = "lm", se = TRUE, color = "black", linetype = "dashed", size = 0.4) +
+  # Manual color scales
+  scale_color_manual(values = histology_colors) +
+  scale_fill_manual(values = histology_colors) +
+  
+  # Labels
+  labs(
+    title = "Neoantigen Burden vs Tumor Mutational Burden (TMB)",
+    x = "log2(Neoantigen Burden)",
+    y = "log2(TMB)",
+    color = 'Histology'
+  ) +
+  theme_minimal()
+
+
+# Check correlation
+# Add 1 to avoid log2(0)
+log_neo <- log2(burden_vs_load$neoantigen_burden + 1)
+log_tmb <- log2(burden_vs_load$total_perMB + 1)
+model <- lm(log_neo ~ log_tmb)
+summary(model)$r.squared
+
+# Check correlation
+cor_test <- cor.test(log_neo, log_tmb, method = "pearson")
+cor_test$p.value
+
+```
+
+### Synchronous DCIS vs IDC
+
+```{r}
+
+# Get synchronous samples
+burden_vs_load_synchronous <- burden_vs_load[burden_vs_load$patientID %in% patients_with_both, ]
+
+# Plot TMB vs load 
+ggplot(burden_vs_load_synchronous, aes(x = log2(neoantigen_burden), y = log2(total_perMB))) +
+  # Shaded group ellipses
+  geom_mark_ellipse(aes(group = group, fill = group), alpha = 0.15, color = NA, show.legend = FALSE) +
+  
+  # Points
+  geom_point(aes(color = group), size = 3) +
+  
+  # Regression line
+  geom_smooth(method = "lm", se = TRUE, color = "black", linetype = "dashed", size = 0.4) +
+  
+  # Manual color scales
+  scale_color_manual(values = histology_colors_simple) +
+  scale_fill_manual(values = histology_colors_simple) +
+  
+  # Labels
+  labs(
+    title = "Neoantigen Burden vs Tumor Mutational Burden (TMB) Synchronous DCIS vs IDC",
+    x = "log2(Neoantigen Burden)",
+    y = "log2(TMB)",
+    color = 'Histology'
+  ) +
+  theme_minimal()
+
+# Check correlation
+# Add 1 to avoid log2(0)
+log_neo <- log2(burden_vs_load_synchronous$neoantigen_burden +1)
+log_tmb <- log2(burden_vs_load_synchronous$total_perMB +1)
+model <- lm(log_neo ~ log_tmb)
+summary(model)$r.squared
+
+# Check correlation
+cor_test <- cor.test(log_neo, log_tmb, method = "pearson")
+cor_test$p.value
+
+```
+
+## Samples mutated per gene
+
+```{r}
+
+# Summarize per gene
+recurrent_genes <- all_neoantigens %>%
+  group_by(Gene.Name, sample) %>%               #
+  summarise(neo_count = n(), .groups = "drop") %>%
+  group_by(Gene.Name) %>%
+  summarise(
+    n_samples_mutated = n_distinct(sample),      # X: how many samples mutated
+    total_neoantigens = sum(neo_count)           # Y: how many neoantigens gene produced
+  ) %>%
+  arrange(desc(total_neoantigens))               # optional: sort by total output
+
+# Plot
+ggplot(recurrent_genes, aes(x = n_samples_mutated, y = total_neoantigens)) +
+  geom_point(alpha = 0.7) +
+  labs(
+    title = "Recurrent Genes with High Neoantigen Generation",
+    x = "Number of Samples Mutated",
+    y = "Total Neoantigens Generated"
+  ) +
+  theme_minimal()
+
+# Calculate correlation
+cor.test(recurrent_genes$n_samples_mutated, recurrent_genes$total_neoantigens, method = "spearman")
+
+```
+
+## Tumor DNA VAF
+
+### Synchronous samples VAF
+
+```{r}
+# Create the jitter plot, faceted by group (DCIS vs IDC)
+ggplot(synchronous_dcis_idc, aes(x = group, y = Tumor.DNA.VAF, color = group)) +
+  geom_jitter(size = 1, width = 0.2, alpha = 1) +  
+  geom_boxplot(alpha = 0, outlier.shape = NA, color = "black", width = 0.5) + 
+  labs(title = "Count of Neoantigens ",
+       x = "Histology",
+       y = "Count of Neoantigens") +
+  scale_color_manual(values = histology_colors_simple) +  
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), 
+        legend.position = 'none') 
+
+```
+
+## Statistics
+
+```{r}
+
+# Metrics between the three groups
+median_metrics <- all_neoantigens %>%
+  group_by(type) %>%
+  summarize(medianIC50 = median(Best.MT.IC50.Score), 
+            minIC50 = min(Best.MT.IC50.Score), 
+            maxIC50 = max(Best.MT.IC50.Score), 
+            medianGX = median(FPKM, na.rm = TRUE), 
+            minGX = min(FPKM, na.rm = TRUE), 
+            maxGX = max(FPKM, na.rm = TRUE), 
+            median_FC = median(FC, na.rm = TRUE), 
+            min_FC = min(FC, na.rm = TRUE), 
+            max_FC = max(FC, na.rm = TRUE),
+            median_VAF = median(Tumor.DNA.VAF, na.rm = TRUE), 
+            min_VAF = min(Tumor.DNA.VAF, na.rm = TRUE), 
+            max_VAF = max(Tumor.DNA.VAF, na.rm = TRUE))
+
+# Calculate metrics synchronous DCIS-IDC
+count_metrics <- agg_all_filtered_count %>%
+  group_by(type) %>%
+  summarize(median_count = median(count),
+            min_count = min(count), 
+            max_count = max(count))
+
+
+# only keep count that are not 0
+agg_all_filtered_count_synchronous <- agg_all_filtered_count_synchronous[agg_all_filtered_count_synchronous$count != 0, ]
+
+# Calculate metrics synchronous DCIS-IDC
+count_metrics_synch <- agg_all_filtered_count_synchronous %>%
+  group_by(group) %>%
+  summarize(median_count = median(count),
+            min_count = min(count), 
+            max_count = max(count))
+
+# Calculate metrics synchronous DCIS-IDC
+median_metrics_synch <- synchronous_dcis_idc %>%
+  group_by(group) %>%
+  summarize(medianIC50 = median(Best.MT.IC50.Score), 
+            minIC50 = min(Best.MT.IC50.Score), 
+            maxIC50 = max(Best.MT.IC50.Score), 
+            medianGX = median(FPKM, na.rm = TRUE), 
+            minGX = min(FPKM, na.rm = TRUE), 
+            maxGX = max(FPKM, na.rm = TRUE),
+            medianFC = median(FC, na.rm = TRUE), 
+            minFC = min(FC, na.rm = TRUE), 
+            maxfC = max(FC, na.rm = TRUE),
+            median_VAF = median(Tumor.DNA.VAF, na.rm = TRUE), 
+            min_VAF = min(Tumor.DNA.VAF, na.rm = TRUE), 
+            max_VAF = max(Tumor.DNA.VAF, na.rm = TRUE)
+            )
+
+# Calculate metrics synchronous DCIS-IDC
+median_metrics_synch <- synchronous_dcis_idc %>%
+  group_by(group) %>%
+  summarize(medianIC50 = median(Best.MT.IC50.Score), 
+            minIC50 = min(Best.MT.IC50.Score), 
+            maxIC50 = max(Best.MT.IC50.Score), 
+            medianGX = median(FPKM, na.rm = TRUE), 
+            minGX = min(FPKM, na.rm = TRUE), 
+            maxGX = max(FPKM, na.rm = TRUE),
+            medianFC = median(FC, na.rm = TRUE), 
+            minFC = min(FC, na.rm = TRUE), 
+            maxfC = max(FC, na.rm = TRUE),
+            median_VAF = median(Tumor.DNA.VAF, na.rm = TRUE), 
+            min_VAF = min(Tumor.DNA.VAF, na.rm = TRUE), 
+            max_VAF = max(Tumor.DNA.VAF, na.rm = TRUE)
+            )
+
+
+# Obtain statistics per group for high affinity percentage
+high_affinity_statistics <- high_affinity %>%
+  group_by(type) %>%
+  summarize(median_strong = median(percent_strong, na.rm = TRUE), 
+            min_strong = min(percent_strong, na.rm = TRUE), 
+            max_strong = max(percent_strong, na.rm = TRUE))
+
+# Obtain statistics per group for high affinity percentage
+high_affinity_statistics_synch <- percent_strong_synchronous %>%
+  group_by(group) %>%
+  summarize(median_strong = median(percent_strong, na.rm = TRUE), 
+            min_strong = min(percent_strong, na.rm = TRUE), 
+            max_strong = max(percent_strong, na.rm = TRUE))
+
+```
+
+## Ranking score
+
+<https://pmc.ncbi.nlm.nih.gov/articles/PMC11495262/>
+
+```{r}
+
+# Obtain separate dfs for the different peptide lengths
+neoantigens_8_mer <- all_neoantigens[all_neoantigens$Peptide.Length == '8', ]
+neoantigens_9_mer <- all_neoantigens[all_neoantigens$Peptide.Length == '9', ]
+neoantigens_10_mer <- all_neoantigens[all_neoantigens$Peptide.Length == '10', ]
+neoantigens_11_mer <- all_neoantigens[all_neoantigens$Peptide.Length == '11', ]
+
+# Calculate the score and rank for all neoantigens
+all_neoantigens_with_rank <- all_neoantigens %>%
+  mutate(score = (1/Median.MT.IC50.Score) +
+                 1/(Median.MT.IC50.Score / Median.WT.IC50.Score) +
+                 (FPKM * 1/(Median.MT.IC50.Score / Median.WT.IC50.Score)) +
+                 (Tumor.DNA.VAF / 2)) %>%
+  filter(!is.na(score)) %>%
+  ungroup() %>%  
+  mutate(rank = dense_rank(dplyr::desc(score)))
+
+# Score metrics
+median_metrics <- all_neoantigens_with_rank %>%
+  group_by(type) %>%
+  summarize(median_score = median(score), 
+            min_score = min(score), 
+            max_score = max(score))
+
+
+# Neoantigens with top 10 ranks
+top10_ranks <- all_neoantigens_with_rank[all_neoantigens_with_rank$rank %in% c(1:15), ]
+top10_ranks <- top10_ranks %>%
+  arrange(desc(rank))
+
+# Select neoantigen with rank 1 up to 10
+rank_selected <- all_neoantigens_with_rank[all_neoantigens_with_rank$rank == '1', ]
+rank_selected <- rank_selected %>% 
+  filter(!if_all(everything(), is.na))
+
+# Tests between the three groups
+#kruskal.test(score ~ type, data = all_neoantigens_with_rank)
+#dunnTest(score ~ type, data = all_neoantigens_with_rank, method = "bonferroni")
+
+# Create boxplot for scores of each type
+ggplot(all_neoantigens_with_rank, aes(x = type, y = score, fill = type)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(width = 0.2, size = 1, alpha = 0.4) +  # optional: to show individual points
+  labs(
+    title = "Neoantigen Score by Type",
+    x = "Type",
+    y = "Score"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  scale_fill_brewer(palette = "Set2")
+
+# Select only columns needed
+rank_selected <- top10_ranks[, c('MT.Epitope.Seq', 
+  "patientID",
+  "type",
+  "group",
+  'rank',
+  'Gene.Name',
+  "HLA.Allele",
+  "Tumor.DNA.VAF",
+  "FPKM",
+  "Median.MT.IC50.Score",
+  "Median.WT.IC50.Score"
+)]
+
+```
+
+### Top 100 rank
+
+```{r}
+
+# Select neoantigen with rank 1 up to 10
+rank_top100 <- all_neoantigens_with_rank[all_neoantigens_with_rank$rank %in% c(1:200), ]
+rank_top100 <- rank_top100 %>% 
+  filter(!if_all(everything(), is.na))
+
+# Select only columns needed
+rank_top100 <- rank_top100[, c('MT.Epitope.Seq', 
+  "patientID",
+  "type",
+  "group",
+  'rank',
+  'Gene.Name',
+  "HLA.Allele",
+  "Tumor.DNA.VAF",
+  "Gene.Expression",
+  "Median.MT.IC50.Score",
+  "Median.WT.IC50.Score"
+)]
+
+# Get only the distinct rows
+rank_top100 <- rank_top100 %>%
+  distinct()
+
+# Count how many times each gene appears
+gene_counts <- rank_top100 %>%
+  count(Gene.Name, sort = TRUE) 
+
+# Count how many times each allele appears
+allele_counts <- rank_top100 %>%
+  count(HLA.Allele, sort = TRUE) 
+
+# Count how many times each allele appears
+type_counts <- rank_top100 %>%
+  count(type, sort = TRUE) 
+
+# Count how many times each allele appears
+group_counts <- rank_top100 %>%
+  count(group, sort = TRUE) 
+
+# Plot
+ggplot(gene_counts, aes(x = reorder(Gene.Name, n), y = n)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Distribution of Genes in Top 100 Neoantigens",
+       x = "Gene Name", y = "Count") +
+  theme_minimal()
+
+```
+
+## Heatmap rank
+
+```{r}
+
+# Create correct patient names
+all_neoantigens_with_rank$patient <- paste(all_neoantigens_with_rank$group, all_neoantigens_with_rank$patientID, sep='_')
+rank_top100$patient <- paste(rank_top100$group, rank_top100$patientID, sep='_')
+
+# Mutate and add a p for the pure samples
+all_neoantigens_with_rank <- all_neoantigens_with_rank %>%
+  mutate(
+    ID = case_when(
+      type == "pure DCIS (n=7)" ~ paste0("p", patient),
+      type == "pure IDC (n=6)"  ~ paste0("p", patient),
+      TRUE                ~ patient
+    )
+  )
+
+# Get all patient names
+patient_names <- unique(all_neoantigens_with_rank$ID)
+patient_names <- c(patient_names, 'DCIS_7419', 'IDC_7419', 'DCIS_7389', 'DCIS_7416')
+
+# Mutate and add a p for the pure samples
+rank_top100 <- rank_top100 %>%
+  mutate(
+    ID = case_when(
+      type == "pure DCIS (n=7)" ~ paste0("p", patient),
+      type == "pure IDC (n=6)"  ~ paste0("p", patient),
+      TRUE                ~ patient
+    )
+  )
+
+# Summarize type counts
+type_counts <- rank_top100 %>%
+  group_by(type) %>%
+  summarise(count = n())
+
+# Create pie chart
+ggplot(type_counts, aes(x = "", y = count, fill = type)) +
+  geom_bar(width = 1, stat = "identity", color = "white") +
+  coord_polar("y") +
+  scale_fill_manual(values = histology_colors) +
+  theme_void() +
+  labs(title = "Neoantigen Type Distribution") +
+  theme(legend.position = "right")
+
+# Prepare type_counts with label positions and labels
+type_counts <- type_counts %>%
+  arrange(desc(type)) %>%
+  mutate(
+    prop = count / sum(count),
+    ypos = cumsum(prop) - 0.5 * prop,
+    label = paste0(count)
+  )
+
+# Plot with count labels
+ggplot(type_counts, aes(x = "", y = count, fill = type)) +
+  geom_bar(width = 1, stat = "identity", color = "white") +
+  coord_polar("y") +
+  geom_text(aes(y = ypos * sum(count), label = label), color = "white", size = 4) +
+  scale_fill_manual(values = histology_colors) +
+  theme_void() +
+  labs(title = "Neoantigen Type Distribution") +
+  theme(legend.position = "right")
+
+# Summarize group counts
+group_counts <- rank_top100 %>%
+  group_by(group) %>%
+  summarise(count = n())
+
+# Create pie chart
+ggplot(group_counts, aes(x = "", y = count, fill = group)) +
+  geom_bar(width = 1, stat = "identity", color = "white") +
+  coord_polar("y") +
+  scale_fill_manual(values = histology_colors_simple) +
+  theme_void() +
+  labs(title = "Neoantigen group Distribution") +
+  theme(legend.position = "right")
+
+# Calculate label positions
+group_counts <- group_counts %>%
+  arrange(desc(group)) %>%
+  mutate(
+    prop = count / sum(count),
+    ypos = cumsum(prop) - 0.5 * prop,
+    label = paste0(count)
+  )
+
+# Plot with labels
+ggplot(group_counts, aes(x = "", y = count, fill = group)) +
+  geom_bar(width = 1, stat = "identity", color = "white") +
+  coord_polar("y") +
+  geom_text(aes(y = ypos * sum(count), label = label), color = "white", size = 4) +
+  scale_fill_manual(values = histology_colors_simple) +
+  theme_void() +
+  labs(title = "Neoantigen Group Distribution") +
+  theme(legend.position = "right")
+
+# Keep only relevant columns
+heatmap_data <- rank_top100 %>%
+  dplyr::select(Gene.Name, ID, rank)
+
+# Create full grid
+heatmap_complete <- expand.grid(
+  ID = patient_names,
+  Gene.Name = unique(heatmap_data$Gene.Name),
+  stringsAsFactors = FALSE
+) %>%
+  left_join(heatmap_data, by = c("ID", "Gene.Name"))
+
+# Step 1: Classify each patient ID into a group
+heatmap_complete <- heatmap_complete %>%
+  mutate(
+    patient_group = case_when(
+      grepl("^pDCIS", ID) ~ "1_pure_DCIS",
+      grepl("^DCIS", ID) ~ "2_DCIS",
+      grepl("^IDC", ID) ~ "3_IDC",
+      grepl("^pIDC", ID) ~ "4_pure_IDC",
+      TRUE ~ "5_Other"
+    )
+  )
+
+# Add the p because it is from a pure sample
+heatmap_complete$ID[heatmap_complete$ID == "DCIS_7416"] <- "pDCIS_7416"
+
+# Classify each patient ID into a group
+heatmap_complete <- heatmap_complete %>%
+  mutate(
+    patient_group = case_when(
+      grepl("^pDCIS", ID) ~ "1_pure_DCIS",
+      grepl("^DCIS", ID) ~ "2_DCIS",
+      grepl("^IDC", ID) ~ "3_IDC",
+      grepl("^pIDC", ID) ~ "4_pure_IDC",
+      TRUE ~ "5_Other"
+    )
+  )
+
+# Convert ID to factor based on group ordering
+heatmap_complete <- heatmap_complete %>%
+  arrange(patient_group, ID) %>%
+  mutate(ID = factor(ID, levels = unique(ID)))  # Keep this factor order in the plot
+
+# Plot heatmap
+heatmap_plot <- ggplot(heatmap_complete, aes(x = ID, y = Gene.Name, fill = rank)) +
+  geom_tile(color = "white") +
+  scale_fill_gradientn(
+    colors = c("darkblue", "dodgerblue", "yellow", "white"),
+    values = scales::rescale(c(1, 50, 100, 101)),
+    na.value = "white",
+    name = "Rank"
+  ) +
+  theme_minimal()+
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1),
+    axis.text.y = element_text(size = 8)
+  ) +
+  labs(
+    title = "Neoantigen Rank Heatmap (Top 100)",
+    x = "Patient ID",
+    y = "Neoantigen (Epitope_Gene)"
+  ) 
+
+# Then save with custom height (e.g., 20 inches)
+ggsave("/Users/sannepetersen/Documents/Bioinformatics and systems biology/NKI Bioinformatics/Bestanden/powerpoint/figures/heatmap_long.jpeg", plot = heatmap_plot, width = 10, height = 13, dpi = 300)
+
+```
+
+## Breast cancer genes
+
+```{r}
+# All breast cancer selected genes
+selected_genes <- c(
+  "TP53", "PIK3CA", "MYC", "CCND1", "PTEN", "ERBB2", "ZNF703", "FGFR1", "GATA3", "RB1", "MAP3K1", 
+  "MAP2K4", "ZNF217", "CDH1", "MLL3", "ARID1B", "CDKN2A", "MLLT4", "AKT1", "FBXW7", "ARID1A", 
+  "CCND3", "CBFB", "MDM2", "CCNE1", "CDKN2B", "NCOR1", "SF3B1", "SPEN", "TBX3", "IGF1R", "BRCA2", 
+  "NF1", "PIK3R1", "EGFR", "KRAS", "ESR1", "FOXA1", "MED23", "CDK6", "NOTCH2", "AKT2", "BRCA1", 
+  "CTCF", "KDM6A", "SETD2", "CREBBP", "DNMT3A", "FOXP1", "MLL2", "RUNX1", "USP9X", "XBP1", 
+  "PDGFRA", "ATR", "ERBB3", "FGFR2", "PALB2", "RHOA", "SMAD4", "ATM", "ATRX", "AXIN1", "BCOR", 
+  "CDKN1B", "CUX1", "GNAS", "MLH1", "NOTCH1", "PHF6", "SMARCA4", "STAG2", "ZFP36L1", "APC", 
+  "CASP8", "CBLB", "CNOT3", "ECT2L", "MEN1", "MSH2", "NRAS", "PBRM1", "PMS2", "STK11", "TET2", 
+  "ASXL1", "BRAF", "BUB1B", "CIC", "ERCC4", "HRAS", "NF2", "PRDM1", "PREX", 'PIK3CA', 'TP53', 'NF1', 'KMT2C', 'ATM', 'NCOR1', 'MAP3K1', 'GATA3', 'PIK3R1', 
+                     'TBX3', 'ERBB3', 'ARID1A', 'MAP2K4', 'ERBB2', 'CBFB', 'CDH1', 'RUNX1', 'CHEK2', 'BRCA1', 'BRCA2', 'SMAD4', 'PIK3CA', 'TP53', 'CDH1', 'MUC16', 'GATA3', 'KMT2C', 'MAP3K1', 'PTEN', 'NCOR1', 'FAT3', 'CSMD3', 'NF1', 'RUNX1', 'LRP1B', 'SPEN', 'MAP2K4', 'ARID1A', 'KMT2D', 'FAT1', 'TBX3')
+
+# Obtain all unique genes
+combined_genes <- unique(selected_genes)
+
+# Select all neoantigens generted by breast cancer genes 
+brca_neoantigens <- all_neoantigens[all_neoantigens$Gene.Name %in% combined_genes, ]
+
+# Obtain genes with most counts
+most_genes_brca <- brca_neoantigens %>%
+  group_by(Gene.Name) %>%
+  summarise(count = n(), .groups = 'drop', 
+            percent = count/7508 * 100) %>%
+  arrange(desc(count)) 
+
+# Select top 20 most frequent genes
+top_genes_brca <- most_genes_brca %>% 
+  slice_max(order_by = count, n = 20)
+
+# Plot top genes count percent
+ggplot(top_genes_brca, aes(x = fct_reorder(Gene.Name, count), y = count)) +
+  geom_bar(stat = "identity", fill = "#1f77b4") +  # Set single color here
+  coord_flip() +
+  labs(
+    title = "Top 20 Breast Cancer Genes Generating Neoantigens",
+    x = "Gene",
+    y = "Neoantigen count"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    legend.position = "none"
+  ) +
+  geom_text(aes(label = count), hjust = -0.2, size = 2.5)
+
+# Count the occurrences of each gene
+agg_gene_count_brca <- brca_neoantigens %>%
+  group_by(Gene.Name, type, group) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  arrange(desc(count)) 
+
+# Count the number of unique groups for each gene
+agg_gene_count_brca_pure <- agg_gene_count_brca[agg_gene_count_brca$type %in% c('pure DCIS (n=7)', 'pure IDC (n=6)'), ]
+
+# Pick colors viridis
+vir_col <- viridis(2, option = 'D')
+color =  c("#1f77b4", "#d73027")
+
+# Adjust the count so that DCIS goes to the left and IDC goes to the right
+agg_gene_count_brca_pure <- agg_gene_count_brca_pure %>%
+  mutate(count_adjusted = ifelse(type == "pure DCIS (n=7)", -count, count))
+
+# Get max absolute value for symmetric x-axis
+max_val <- max(abs(agg_gene_count_brca_pure$count_adjusted))
+
+# Plot
+ggplot(agg_gene_count_brca_pure, aes(x = count_adjusted, y = reorder(Gene.Name, count), fill = type)) + 
+  geom_bar(stat = "identity", alpha = 1) +
+  scale_fill_manual(values = color) +
+  coord_cartesian(xlim = c(-max_val, max_val)) +  # Symmetric axis
+  labs(
+    title = "BRCA Genes: Pure DCIS vs Pure IDC",
+    x = "Neoantigen Count",
+    y = "Gene",
+    fill = "Condition"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 6),
+    legend.position = "top"
+  ) +
+  scale_x_continuous(labels = abs)  # Absolute labels
+
+```
+
+### BRCA genes synchronous
+
+```{r}
+
+# Count the number of unique groups for each gene
+agg_gene_count_brca_synch <- agg_gene_count_brca[agg_gene_count_brca$type == 'DCIS & IDC (n=20)', ]
+
+# Pick colors viridis
+vir_col <- viridis(2, option = 'D')
+color =  c("#1f77b4", "#d73027")
+
+# Adjust the count so that DCIS goes to the left and IDC goes to the right
+agg_gene_count_brca_synch <- agg_gene_count_brca_synch %>%
+  mutate(count_adjusted = ifelse(group == "DCIS", -count, count))
+
+# Get max absolute value for symmetric x-axis
+max_val <- max(abs(agg_gene_count_brca_synch$count_adjusted))
+
+# Plot
+ggplot(agg_gene_count_brca_synch, aes(x = count_adjusted, y = reorder(Gene.Name, count), fill = group)) + 
+  geom_bar(stat = "identity", alpha = 1) +
+  scale_fill_manual(values = color) +
+  coord_cartesian(xlim = c(-max_val, max_val)) +  # Symmetric axis
+  labs(
+    title = "BRCA Genes: Pure DCIS vs Pure IDC",
+    x = "Neoantigen Count",
+    y = "Gene",
+    fill = "Condition"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 6),
+    legend.position = "top"
+  ) +
+  scale_x_continuous(labels = abs)  # Absolute labels
+
+```
+
+### Genes generating unique peptides
+
+```{r}
+
+# Obtain genes with most counts
+peptide_genes_brca <- brca_neoantigens %>%
+  distinct(Gene.Name, MT.Epitope.Seq) %>%         # Keep only unique Gene–Peptide pairs
+  group_by(Gene.Name) %>%
+  summarise(
+    unique_peptide_count = n(),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(unique_peptide_count))
+
+
+# Select top 20 most frequent genes
+peptide_genes_brca <- peptide_genes_brca %>% 
+  slice_max(order_by = unique_peptide_count, n = 20)
+
+# Plot top genes count percent
+ggplot(peptide_genes_brca, aes(x = fct_reorder(Gene.Name, unique_peptide_count), y = unique_peptide_count)) +
+  geom_bar(stat = "identity", fill = "#1f77b4") +  # Set a fixed blue color
+  coord_flip() +
+  labs(
+    title = "Top 20 Breast Cancer Genes Generating Neoantigens",
+    x = "Gene",
+    y = "Unique peptide count"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    legend.position = "none"
+  ) +
+  geom_text(aes(label = unique_peptide_count), hjust = -0.2, size = 2.5)
+
+# Obtain genes with most counts
+peptide_genes <- all_neoantigens %>%
+  distinct(Gene.Name, MT.Epitope.Seq) %>%         # Keep only unique Gene–Peptide pairs
+  group_by(Gene.Name) %>%
+  summarise(
+    unique_peptide_count = n(),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(unique_peptide_count))
+
+
+# Select top 20 most frequent genes
+peptide_genes <- peptide_genes %>% 
+  slice_max(order_by = unique_peptide_count, n = 20)
+
+# Plot top genes count percent
+ggplot(peptide_genes, aes(x = fct_reorder(Gene.Name, unique_peptide_count), y = unique_peptide_count)) +
+  geom_bar(stat = "identity", fill = "#1f77b4") +  # Fixed blue color
+  coord_flip() +
+  labs(
+    title = "Top 20 Generating Neoantigens",
+    x = "Gene",
+    y = "Unique peptide count"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    legend.position = "none"
+  ) +
+  geom_text(aes(label = unique_peptide_count), hjust = -0.2, size = 2.5)
+
+
+```
+
+### BRCA genes percentage of patients with genes
+
+```{r}
+
+# Step 1: Calculate the total number of patients (distinct samples) per group
+total_patients_per_group_brca <- brca_neoantigens %>%
+  group_by(group) %>%
+  summarise(total_patients = n_distinct(sample), .groups = 'drop')
+
+# Step 2: Count the number of distinct patients per gene and group
+gene_patient_count_per_group_brca <- brca_neoantigens %>%
+  group_by(Gene.Name, group) %>%
+  summarise(patients_with_neoantigen = n_distinct(sample), .groups = 'drop')
+
+# Step 3: Merge the total patient count with the gene_patient_count_per_group to calculate the percentage
+gene_patient_count_per_group_brca <- gene_patient_count_per_group_brca %>%
+  left_join(total_patients_per_group_brca, by = "group") %>%
+  mutate(percentage_patients = (patients_with_neoantigen / total_patients) * 100) %>%
+  arrange(group, desc(percentage_patients))
+
+# Step 4: Select the top genes by percentage (e.g., top 40 genes for each group)
+top_genes_by_percentage_brca <- gene_patient_count_per_group_brca %>%
+  group_by(group) %>%
+  top_n(10, percentage_patients) %>%
+  ungroup()
+
+# Determine colors
+color =  c("#1f77b4", "#d73027")
+
+# Adjust the count so that DCIS goes to the left and IDC goes to the right
+top_genes_by_percentage_brca <- top_genes_by_percentage_brca %>%
+  mutate(percentage_patients_adjusted = ifelse(group == "DCIS", -percentage_patients, percentage_patients))
+
+# Plot the stacked bar chart with adjusted counts
+ggplot(top_genes_by_percentage_brca, aes(x = percentage_patients_adjusted, y = reorder(Gene.Name, percentage_patients_adjusted), fill = group)) + 
+  geom_bar(stat = "identity", alpha = 1) + 
+  scale_fill_manual(values = color) + 
+  labs(title = "Most Occurring Genes Producing Neoantigens BRCA genes top 10 per group", 
+       x = "Percentage (%)", 
+       y = "Gene", 
+       fill = 'Histology') + 
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+        axis.text.y = element_text(size = 6), 
+        legend.position = 'top') +
+  scale_x_continuous(labels = abs) 
+
+```
+
+### Now not per group
+
+```{r}
+
+# Step 1: Calculate the total number of patients (distinct samples) per group
+total_patients_per_group_brca <- brca_neoantigens %>%
+  summarise(total_patients = n_distinct(sample), .groups = 'drop')
+
+# Step 2: Count the number of distinct patients per gene and group
+gene_patient_count_per_group_brca <- brca_neoantigens %>%
+  group_by(Gene.Name) %>%
+  summarise(patients_with_neoantigen = n_distinct(sample), .groups = 'drop')
+
+# Step 3: Merge the total patient count with the gene_patient_count_per_group to calculate the percentage
+gene_patient_count_per_group_brca <- gene_patient_count_per_group_brca %>%
+  mutate(percentage_patients = (patients_with_neoantigen / 29) * 100) %>%
+  arrange(desc(percentage_patients))
+
+# Step 4: Select the top genes by percentage (e.g., top 40 genes for each group)
+top_genes_by_percentage_brca <- gene_patient_count_per_group_brca %>%
+  top_n(15, percentage_patients) %>%
+  ungroup()
+
+# Determine colors
+color =  c("#1f77b4", "#d73027")
+
+# Plot the stacked bar chart with adjusted counts
+ggplot(top_genes_by_percentage_brca, aes(x = percentage_patients, y = reorder(Gene.Name, percentage_patients))) + 
+  geom_bar(stat = "identity", alpha = 1) + 
+  scale_fill_manual(values = color) + 
+  labs(title = "Most Occurring Genes Producing Neoantigens BRCA genes top 10 per group", 
+       x = "Percentage (%)", 
+       y = "Gene", 
+       fill = 'Histology') + 
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+        axis.text.y = element_text(size = 6), 
+        legend.position = 'top') 
+
+
+```
+
+### Neoantigen count BRCA genes
+
+```{r}
+
+# Calculate percentage of each binding category for each patient
+agg_all_filtered_count_brca <- brca_neoantigens %>%
+  group_by(sample, type) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  ungroup()
+
+# Create the jitter plot, faceted by group (DCIS vs IDC)
+ggplot(agg_all_filtered_count_brca, aes(x = type, y = count, color = type)) +
+  geom_jitter(size = 3, width = 0.2, alpha = 1) +  
+  geom_boxplot(alpha = 0, outlier.shape = NA, color = "black", width = 0.5) + 
+  labs(title = "Count of Neoantigens BRCA genes ",
+       x = "Histology",
+       y = "Count of Neoantigens") +
+  scale_color_manual(values = histology_colors) +  
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), 
+        legend.position = 'none') 
+
+```
+
+## Strict neoantigen selection
+
+```{r}
+# Filter strict neoantigens (more filtering steps)
+strict_neoantigens <- all_neoantigens[all_neoantigens$FC < 1, ]
+strict_neoantigens <- strict_neoantigens[strict_neoantigens$MHCnuggetsI.MT.IC50.Score < 500, ]
+strict_neoantigens <- strict_neoantigens[strict_neoantigens$NetMHCcons.MT.IC50.Score < 500, ]
+strict_neoantigens <- strict_neoantigens[strict_neoantigens$NetMHCpan.MT.IC50.Score < 500, ]
+strict_neoantigens <- strict_neoantigens[!is.na(strict_neoantigens$Gene.Name), ]
+
+# Calculate the score again
+strict_neoantigens <- strict_neoantigens %>%
+  mutate(score = (1/Median.MT.IC50.Score) + 1/FC + (Gene.Expression * 1/FC) + (Tumor.DNA.VAF / 2))
+
+# See which ones don't produce strict neoantigens
+samples_strict <- unique(strict_neoantigens$sample)
+samples_all <- unique(all_neoantigens$sample)
+no_strict <- setdiff(samples_all, samples_strict)
+
+# Select columns needed
+selected_strict_neoantigens <- strict_neoantigens[, c('Median.MT.IC50.Score', 'FC', 'Gene.Expression', 'Tumor.DNA.VAF', 'score', 'Best.MT.IC50.Score', 'Corresponding.WT.IC50.Score', 'binding', 'patientID', 'type', 'group')]
+
+# Obtain separate dfs for the different peptide lengths
+neoantigens_8_mer_strict <- strict_neoantigens[strict_neoantigens$Peptide.Length == '8', ]
+neoantigens_9_mer_strict <- strict_neoantigens[strict_neoantigens$Peptide.Length == '9', ]
+neoantigens_10_mer_strict <- strict_neoantigens[strict_neoantigens$Peptide.Length == '10', ]
+neoantigens_11_mer_strict <- strict_neoantigens[strict_neoantigens$Peptide.Length == '11', ]
+
+# Calculate score for 8-mers
+neoantigens_8_mer_strict <- neoantigens_8_mer_strict %>%
+  mutate(score = (1/Median.MT.IC50.Score) + 1/FC + (Gene.Expression * 1/FC) + (Tumor.DNA.VAF / 2))
+
+# Calculate score for 9-mers
+neoantigens_9_mer_strict <- neoantigens_9_mer_strict %>%
+  mutate(score = (1/Median.MT.IC50.Score) + 1/FC + (Gene.Expression * 1/FC) + (Tumor.DNA.VAF / 2))
+
+# Calculate score for 10-mers
+neoantigens_10_mer_strict <- neoantigens_10_mer_strict %>%
+  mutate(score = (1/Median.MT.IC50.Score) + 1/FC + (Gene.Expression * 1/FC) + (Tumor.DNA.VAF / 2))
+
+# Calculate score for 11-mers
+neoantigens_11_mer_strict <- neoantigens_11_mer_strict %>%
+  mutate(score = (1/Median.MT.IC50.Score) + 1/FC + (Gene.Expression * 1/FC) + (Tumor.DNA.VAF / 2))
+
+# Calculate count per patient strict neoantigens
+strict_neoantigens_count <- strict_neoantigens %>%
+  group_by(type, sample) %>%
+  summarize(count = n())
+
+# Get statistics strict neoantigens for count
+strict_neoantigens_count_stats <- strict_neoantigens_count %>%
+  group_by(type) %>%
+  summarize(med = median(count), 
+            min = min(count), 
+            max = max(count))
+
+# Get statistics strict neoantigens for peptide length
+all_neoantigens_length <- all_neoantigens %>%
+  group_by(Peptide.Length) %>%
+  summarize(med = median(Best.MT.IC50.Score), 
+            min = min(Best.MT.IC50.Score), 
+            max = max(Best.MT.IC50.Score))
+```
+
+### Genes and length with most counts
+
+```{r}
+
+# Obtain genes with most counts
+most_genes_strict <- strict_neoantigens %>%
+  group_by(Gene.Name) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  arrange(desc(count)) 
+
+# Obtain genes with most counts
+lengths_strict <- strict_neoantigens %>%
+  group_by(Peptide.Length) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  arrange(desc(count)) 
+
+# Count the occurrences of each gene
+agg_gene_count_brca <- brca_neoantigens %>%
+  group_by(Gene.Name, group) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  arrange(desc(count)) 
+
+# Count the number of unique groups for each gene
+genes_in_one_group_brca <- agg_gene_count_brca %>%
+  group_by(Gene.Name) %>%
+  summarise(unique_groups = n_distinct(group), .groups = 'drop') %>%
+  filter(unique_groups == 1)
+
+# Filter the original data frame to select only these genes
+genes_in_one_group_df_brca <- agg_gene_count_brca %>%
+  filter(Gene.Name %in% genes_in_one_group$Gene.Name)
+
+# Get the top most occuring genes
+agg_gene_names_brca <- agg_gene_count_brca %>% head(40)
+agg_gene_names_brca <- as.data.frame(agg_gene_names_brca)
+agg_gene_names_brca <- agg_gene_names_brca %>% pull(Gene.Name) %>% unique()
+
+# Select
+agg_gene_count_select_brca <- agg_gene_count_brca[agg_gene_count_brca$Gene.Name %in% agg_gene_names_brca, ]
+
+# Pick colors viridis
+vir_col <- viridis(2, option = 'D')
+color =  c("#1f77b4", "#d73027")
+
+# Adjust the count so that DCIS goes to the left and IDC goes to the right
+agg_gene_count_select_brca <- agg_gene_count_select_brca %>%
+  mutate(count_adjusted = ifelse(group == "DCIS", -count, count))
+
+# Plot the stacked bar chart with adjusted counts
+ggplot(agg_gene_count_select_brca, aes(x = count_adjusted, y = reorder(Gene.Name, count), fill = group)) + 
+  geom_bar(stat = "identity", alpha = 1) + 
+  scale_fill_manual(values = color) + 
+  labs(title = "Most Occurring Genes Producing Neoantigens of BRCA selected genes", 
+       x = "Neoantigen Count", 
+       y = "Gene", 
+       fill = 'Histology') + 
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+        axis.text.y = element_text(size = 6), 
+        legend.position = 'top') +
+  scale_x_continuous(labels = abs) 
+
+```
+
+### Neoantigen count histologies
+
+```{r}
+
+# Calculate percentage of each binding category for each patient
+agg_all_filtered_count_strict <- strict_neoantigens %>%
+  group_by(sample, type) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  ungroup()
+
+# Define the order of the x-axis
+agg_all_filtered_count_strict$type <- factor(
+  agg_all_filtered_count_strict$type,
+  levels = c("pure DCIS (n=7)", "DCIS & IDC (n=20)", "pure IDC (n=6)")
+)
+
+# Create the jitter plot, faceted by group (DCIS vs IDC)
+ggplot(agg_all_filtered_count_strict, aes(x = type, y = count, color = type)) +
+  geom_jitter(size = 3, width = 0.2, alpha = 1) +  
+  geom_boxplot(alpha = 0, outlier.shape = NA, color = "black", width = 0.5) + 
+  labs(title = "Count of Neoantigens ",
+       x = "Histology",
+       y = "Count of Neoantigens") +
+  scale_color_manual(values = histology_colors) +  
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), 
+        legend.position = 'none') 
+
+# Tests between the three groups
+#kruskal.test(count ~ type, data = agg_all_filtered_count_strict)
+
+```
+
+### Count synchronous DCIS and IDC
+
+```{r}
+
+# Obtain synchronous samples
+synchronous_strict_neoantigens <- strict_neoantigens[strict_neoantigens$patient %in% samples_with_both, ]
+
+# Calculate percentage of each binding category for each patient
+agg_all_filtered_count_strict_synchronous <- synchronous_strict_neoantigens %>%
+  group_by(sample, group, patientID) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  ungroup()
+
+# Create the jitter plot, faceted by group (DCIS vs IDC)
+ggplot(agg_all_filtered_count_strict_synchronous, aes(x = group, y = count, fill=group)) + 
+  geom_violin(alpha = 0.5, trim = FALSE, color = NA) +  
+  geom_point(color = "black", size = 2, alpha = 1) + 
+  geom_line(aes(group = patientID), color = "gray40", size = 0.5, alpha = 0.6) +  
+  stat_summary(
+    fun.data = function(y) {
+      data.frame(
+        y = median(y),
+        ymin = quantile(y, 0.25),
+        ymax = quantile(y, 0.75)
+      )
+    },
+    geom = "pointrange", color = "#D1495B", size = 0.4  # IQR and median
+  ) + 
+  scale_fill_manual(values = histology_colors_simple) +
+  labs(
+    title = "Synchronous DCIS vs. IDC Neoantigen Count",
+    x = NULL,
+    y = "# neoantigens per patient"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    axis.text.x = element_text(size = 11),
+    axis.text.y = element_text(size = 11)
+  )
+
+```
+
+### Score distribution
+
+```{r}
+
+# Create the jitter plot, faceted by group (DCIS vs IDC)
+ggplot(strict_neoantigens, aes(x = type, y = score, color = type)) +
+  geom_jitter(size = 3, width = 0.2, alpha = 1) +  
+  geom_boxplot(alpha = 0, outlier.shape = NA, color = "black", width = 0.5) + 
+  labs(title = "Count of Neoantigens ",
+       x = "Histology",
+       y = "Count of Neoantigens") +
+  scale_color_manual(values = histology_colors) +  
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), 
+        legend.position = 'none') 
+
+# Remove best
+strict_neoantigens_rm_best <- strict_neoantigens[!strict_neoantigens$MT.Epitope.Seq == 'KYLKSAVL', ]
+
+# Order the top scores
+top_scores <- strict_neoantigens %>%
+  arrange(desc(score))
+
+# Keep only the unique scores
+top_scores_unique <- top_scores %>%
+  distinct(score, .keep_all = TRUE)
+
+# Obtain the sequences of the unique scores
+unique(top_scores$WT.Epitope.Seq)
+
+# Again remove the best score
+top_scores_unique_rm_best <- top_scores_unique[!top_scores_unique$MT.Epitope.Seq == 'KYLKSAVL', ]
+
+# Create the jitter plot, faceted by group (DCIS vs IDC)
+ggplot(top_scores_unique_rm_best, aes(x = type, y = score, color = type)) +
+  geom_jitter(size = 1, width = 0.2, alpha = 1) +  
+  geom_boxplot(alpha = 0, outlier.shape = NA, color = "black", width = 0.5) + 
+  labs(title = "Count of Neoantigens ",
+       x = "Histology",
+       y = "Count of Neoantigens") +
+  scale_color_manual(values = histology_colors) +  
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), 
+        legend.position = 'none') 
+
+```
+
+## Selected peptide
+
+```{r}
+
+# Select PIK3CA peptides
+selected_peptide_PIK3CA <- all_neoantigens[all_neoantigens$MT.Epitope.Seq %in% c('YFMKQMNDAR', 'EYFMKQMNDAR', 'YFMKQMNDAR', 'ARHGGWTTK'), ]
+selected_peptide_PIK3CA <- all_neoantigens[all_neoantigens$MT.Epitope.Seq == 'YFMKQMNDAR', ]
+selected_peptide_PIK3CA <- all_neoantigens[all_neoantigens$MT.Epitope.Seq == 'YFMKQMNDAR', ]
+
+```
+
+## Plot all information strict neoantigens
+
+```{r}
+# library boot
+# Function to calculate CI
+get_ci <- function(x) {
+  boot_out <- boot(x, function(x, i) median(x[i], na.rm = TRUE), R = 1000)
+  ci <- boot.ci(boot_out, type = "perc")$percent[4:5]
+  return(ci)
+}
+
+# Summarize in one pipeline
+summary_data <- strict_neoantigens %>%
+  group_by(type) %>%
+  summarise(
+
+    mean_FC = mean(FC, na.rm = TRUE),
+    median_FC = median(FC, na.rm = TRUE),
+    ci_low_FC = get_ci(FC)[1],
+    ci_high_FC = get_ci(FC)[2],
+
+    mean_VAF = mean(Tumor.DNA.VAF, na.rm = TRUE),
+    median_VAF = median(Tumor.DNA.VAF, na.rm = TRUE),
+    ci_low_VAF = get_ci(Tumor.DNA.VAF)[1],
+    ci_high_VAF = get_ci(Tumor.DNA.VAF)[2],
+
+    mean_expr = mean(FPKM, na.rm = TRUE),
+    median_expr = median(FPKM, na.rm = TRUE),
+    ci_low_expr = get_ci(FPKM)[1],
+    ci_high_expr = get_ci(FPKM)[2],
+    
+    mean_IC50 = mean(Best.MT.IC50.Score, na.rm = TRUE),
+    median_IC50 = median(Best.MT.IC50.Score, na.rm = TRUE),
+    ci_low_IC50 = get_ci(Best.MT.IC50.Score)[1],
+    ci_high_IC50 = get_ci(Best.MT.IC50.Score)[2]
+  )
+
+
+# Create long summary
+summary_long <- summary_data %>%
+  dplyr::select(type,
+         starts_with("median_"),
+         starts_with("ci_low_"),
+         starts_with("ci_high_")) %>%
+  pivot_longer(
+    cols = -type,
+    names_to = c("stat", "metric"),
+    names_pattern = "(median|ci_low|ci_high)_(.*)"
+  ) %>%
+  pivot_wider(
+    names_from = stat,
+    values_from = value
+  )
+
+# Create long df
+mean_long <- summary_data %>%
+  dplyr::select(type,
+                starts_with("mean_")) %>%
+  pivot_longer(
+    cols = -type,
+    names_to = "metric",
+    values_to = "mean"
+  ) %>%
+  mutate(metric = sub("mean_", "", metric))
+
+# Rename
+mean_long <- mean_long %>%
+  mutate(metric = str_replace(metric, "expr", "FPKM"))
+summary_long <- summary_long %>%
+  mutate(metric = str_replace(metric, "expr", "FPKM"))
+
+# Define the order of the x-axis
+summary_long$type <- factor(
+  summary_long$type,
+  levels = c("pure DCIS (n=7)", "DCIS & IDC (n=20)", "pure IDC (n=6)")
+)
+
+# Plot with medians, 95% CIs, and black dots for means
+ggplot(summary_long, aes(x = type, y = median, color = type)) +
+  geom_point(size = 2, shape = 16) +  # Median as filled dots
+  geom_errorbar(aes(ymin = ci_low, ymax = ci_high), width = 0.15) +
+  geom_point(data = mean_long, aes(x = type, y = mean), 
+             shape = 21, fill = "white", color = "black", size = 1, stroke = 1) +  
+  facet_wrap(~metric, scales = "free_y", ncol = 2) +  
+  labs(
+    x = "Histology",
+    y = "Median Value (with 95% CI)",
+    title = "Neoantigen-Related Metrics by Lesion Type"
+  ) +
+  scale_color_manual(values = histology_colors) +  
+  theme_minimal(base_size = 12) +
+  theme(
+    strip.background = element_rect(fill = "#f0f0f0", color = NA),
+    strip.text = element_text(size = 10, face = "bold"),
+    axis.text.x = element_text(size = 6, angle = 0, hjust = 0.5),
+    axis.title.y = element_text(size = 12),
+    panel.grid.major.y = element_line(color = "gray85"),
+    panel.spacing = unit(1, "lines"),
+    plot.title = element_text(size = 14, face = "bold"),
+    legend.position = "none"
+  )
+```
+
+## IC50 scores methods distribution
+
+```{r}
+
+# Summarize in one pipeline
+summary_data_IC50_methods <- strict_neoantigens %>%
+  group_by(type) %>%
+  summarise(
+    mean_IC50_MHCnuggets = mean(MHCnuggetsI.MT.IC50.Score, na.rm = TRUE),
+    median_IC50_MHCnuggets = median(MHCnuggetsI.MT.IC50.Score, na.rm = TRUE),
+    ci_low_IC50_MHCnuggets = get_ci(MHCnuggetsI.MT.IC50.Score)[1],
+    ci_high_IC50_MHCnuggets = get_ci(MHCnuggetsI.MT.IC50.Score)[2],
+
+    mean_IC50_NetMHCpan = mean(NetMHCpan.MT.IC50.Score, na.rm = TRUE),
+    median_IC50_NetMHCpan = median(NetMHCpan.MT.IC50.Score, na.rm = TRUE),
+    ci_low_IC50_NetMHCpan= get_ci(NetMHCpan.MT.IC50.Score)[1],
+    ci_high_IC50_NetMHCpan = get_ci(NetMHCpan.MT.IC50.Score)[2],
+
+    mean_IC50_NetMHCcons = mean(NetMHCcons.MT.IC50.Score, na.rm = TRUE),
+    median_IC50_NetMHCcons = median(NetMHCcons.MT.IC50.Score, na.rm = TRUE),
+    ci_low_IC50_NetMHCcons = get_ci(NetMHCcons.MT.IC50.Score)[1],
+    ci_high_IC50_NetMHCcons = get_ci(NetMHCcons.MT.IC50.Score)[2],
+
+    mean_IC50_DeepImmuno = mean(DeepImmuno.MT.Score, na.rm = TRUE),
+    median_IC50_DeepImmuno = median(DeepImmuno.MT.Score, na.rm = TRUE),
+    ci_low_IC50_DeepImmuno = get_ci(DeepImmuno.MT.Score)[1],
+    ci_high_IC50_DeepImmuno = get_ci(DeepImmuno.MT.Score)[2],
+  )
+
+# Create long df
+summary_long_IC50_methods <- summary_data_IC50_methods %>%
+  dplyr::select(type,
+         starts_with("median_"),
+         starts_with("ci_low_"),
+         starts_with("ci_high_")) %>%
+  pivot_longer(
+    cols = -type,
+    names_to = c("stat", "metric"),
+    names_pattern = "(median|ci_low|ci_high)_(.*)"
+  ) %>%
+  pivot_wider(
+    names_from = stat,
+    values_from = value
+  )
+
+# Create long df
+mean_long_IC50 <- summary_data_IC50_methods %>%
+  dplyr::select(type,
+                starts_with("mean_")) %>%
+  pivot_longer(
+    cols = -type,
+    names_to = "metric",
+    values_to = "mean"
+  ) %>%
+  mutate(metric = sub("mean_", "", metric))
+
+# Plot with medians, 95% CIs, and black dots for means
+ggplot(summary_long_IC50_methods, aes(x = type, y = median, color = type)) +
+  geom_point(size = 2, shape = 16) +  # Median as filled dots
+  geom_errorbar(aes(ymin = ci_low, ymax = ci_high), width = 0.15) +
+  geom_point(data = mean_long_IC50, aes(x = type, y = mean), 
+             shape = 21, fill = "white", color = "black", size = 1, stroke = 1) +  # Mean as hollow black dots
+  facet_wrap(~metric, scales = "free_y", ncol = 2) +  # Adjust ncol as needed
+  labs(
+    x = "Histology",
+    y = "Median Value (with 95% CI)",
+    title = "Neoantigen prediction methods IC50 scores"
+  ) +
+  scale_color_manual(values = histology_colors) +  # Make sure this is defined
+  theme_minimal(base_size = 12) +
+  theme(
+    strip.background = element_rect(fill = "#f0f0f0", color = NA),
+    strip.text = element_text(size = 10, face = "bold"),
+    axis.text.x = element_text(size = 10, angle = 0, hjust = 0.5),
+    axis.title.y = element_text(size = 12),
+    panel.grid.major.y = element_line(color = "gray85"),
+    panel.spacing = unit(1, "lines"),
+    plot.title = element_text(size = 14, face = "bold"),
+    legend.position = "none"
+  )
+```
+
+## Neoantigen load of 9 and 10-mers
+
+```{r}
+
+# Only obtain the 9 and 10-mers
+neoantigens_9_10_mers <- all_neoantigens[all_neoantigens$Peptide.Length %in% c(9,10,11), ]
+
+neoantigens_9_10_mers <- neoantigens_9_10_mers %>%
+  mutate(FC_new = Corresponding.WT.IC50.Score / Best.MT.IC50.Score)
+
+neoantigens_9_10_mers <- neoantigens_9_10_mers[neoantigens_9_10_mers$FC_new >= 10, ]
+
+# Calculate percentage of each binding category for each patient
+count_9_10_mers <- neoantigens_9_10_mers %>%
+  group_by(sample, type) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  ungroup()
+
+# Define patients and binding levels
+patients <- c("HX7389_DCIS", "HX7419_DCIS", "HX7419_IDC", "HX7416_DCIS")
+type <- c('DCIS & IDC (n=20)', 'DCIS & IDC (n=20)', 'DCIS & IDC (n=20)', 'pure DCIS (n=7)')
+count <- c(0, 0, 0, 0)
+  
+# Create all combinations
+missing_patients_neo <- data.frame(
+  sample = patients,
+  type = type,
+  count = count,
+  stringsAsFactors = FALSE
+)
+
+# Merge with patients without predicted neoantigens
+count_9_10_mers <- rbind(count_9_10_mers, missing_patients_neo)
+
+# Calculate statistics
+statistics_9_10_mer <- count_9_10_mers %>%
+  summarize(median = median(count), 
+            min = min(count), 
+            max = max(count))
+```

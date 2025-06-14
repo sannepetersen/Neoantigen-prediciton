@@ -1,0 +1,258 @@
+---
+title: "Combine neoantigen data"
+date: "2025-04-25"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(repos = c(CRAN = "https://cloud.r-project.org/"))
+```
+
+# Load packages
+
+```{r}
+# Load packages
+library(vroom)
+library(readr)
+library(dplyr)
+library(stringr)  
+library(R.utils)
+library(tidyr)
+library(BiocManager)
+library(rtracklayer)
+library(IRanges)
+library(data.table)
+library(ggplot2)
+library(BSgenome)
+library(BSgenome.Hsapiens.UCSC.hg38)  
+library(biomaRt)
+library(viridis)
+library(tidyverse)
+library(ggbeeswarm) 
+library(maftools)
+library(vcf2mafR)
+library(RColorBrewer)
+library(ggridges)
+library(pathwayTMB)
+library(maftools)
+library(ggforce)
+library(boot)
+```
+
+# Load data
+
+## Load all files
+
+```{r}
+
+# Obtain path to neoantigen data files
+agg_all_path <- c('/Users/sannepetersen/Documents/Bioinformatics and systems biology/NKI Bioinformatics/neoantigen analysis')
+
+# List all .tsv files in the folder
+tsv_files <- list.files(path = agg_all_path, pattern = "\\.tsv$", full.names = TRUE)
+
+# Loop over the files and create a separate dataframe for each
+for (file in tsv_files) {
+  # Get a clean name for the variable (remove folder and extension)
+  df_name <- gsub("\\.tsv$", "", basename(file))
+
+  # Read the file
+  df <- read.delim(file, sep = "\t", header = FALSE, stringsAsFactors = FALSE)
+
+  # Assign to a variable in the global environment
+  assign(df_name, df)
+}
+
+# Get all data frame names (based on your file names)
+df_names <- gsub("\\.tsv$", "", basename(tsv_files))
+
+# Select column names
+column_names <- c(
+  "Chromosome", "Start", "Stop", "Reference", "Variant", "Transcript",
+  "Transcript Support Level", "Transcript Length", "Biotype", "Ensembl Gene ID",
+  "Variant Type", "Mutation", "Protein Position", "Gene Name", "HGVSc", "HGVSp",
+  "HLA Allele", "Peptide Length", "Sub-peptide Position", "Mutation Position",
+  "MT Epitope Seq", "WT Epitope Seq", "Best MT IC50 Score Method",
+  "Best MT IC50 Score", "Corresponding WT IC50 Score", "Corresponding Fold Change",
+  "Best MT Percentile Method", "Best MT Percentile", "Corresponding WT Percentile",
+  "Tumor DNA Depth", "Tumor DNA VAF", "Tumor RNA Depth", "Tumor RNA VAF",
+  "Normal Depth", "Normal VAF", "Gene Expression", "Transcript Expression",
+  "Median MT IC50 Score", "Median WT IC50 Score", "Median Fold Change",
+  "Median MT Percentile", "Median WT Percentile", "MHCnuggetsI WT IC50 Score",
+  "MHCnuggetsI MT IC50 Score", "MHCnuggetsI WT Percentile", "MHCnuggetsI MT Percentile",
+  "NetMHCcons WT IC50 Score", "NetMHCcons MT IC50 Score", "NetMHCcons WT Percentile",
+  "NetMHCcons MT Percentile", "NetMHCpan WT IC50 Score", "NetMHCpan MT IC50 Score",
+  "NetMHCpan WT Percentile", "NetMHCpan MT Percentile", "Index",
+  "DeepImmuno WT Score", "DeepImmuno MT Score", "cterm_7mer_gravy_score",
+  "max_7mer_gravy_score", "difficult_n_terminal_residue", "c_terminal_cysteine",
+  "c_terminal_proline", "cysteine_count", "n_terminal_asparagine",
+  "asparagine_proline_bond_count"
+)
+
+# Assign column names to each one
+for (df_name in df_names) {
+  if (exists(df_name)) {
+    df <- get(df_name)
+    if (ncol(df) == length(column_names)) {
+      colnames(df) <- column_names
+      assign(df_name, df)
+    } else {
+      warning(paste("Column count mismatch in", df_name))
+    }
+  }
+}
+
+```
+
+### Patient IDs DCIS and IDC
+
+```{r}
+# Patient numbers with DCIS
+DCIS_patients <- c('7420','7419', '7416', '7408', '7402','7394', '7389', '7386', '7379', '7363', '0648', '0455', '0355', '0332', '0232', '0193', '0169')
+
+# Patient numbers with IDC
+IDC_patients <- c('7419', '7402', '0711', '0553', '0537', '0496', '0493', '0445',
+                  '0443', '0387', '0375', '0355', '0332', '0198', '0193', '0169')
+
+
+# PatientIDs of patients with synchronous DCIS & IDC
+patients_with_both <- c('0169', '0193', '0332', '0355', '7419', '7402')
+
+samples_with_both <- c('DCIS_0169', 'DCIS_0193', 'DCIS_0332', 'DCIS_0355', 'DCIS_7419', 'DCIS_7402', 'IDC_0169', 'IDC_0193', 'IDC_0332', 'IDC_0355', 'IDC_7419', 'IDC_7402')
+
+# PatientIDs of patients with pure IDC
+patients_only_idc <- c('0198', '0443', '0493', '0496', '0553', '0445')
+
+# PatientIDs of patients with pure DCIS
+patients_only_dcis <- c('7363', '7379', '7386', '7408', '7416', '7420',
+                        '0232')
+
+# Patients with synchronous DCIS & IDC
+synchronous_patients <- c('0169', '0193', '0332', '0355', '7419', '7402', '0375', '0387', 
+                           '0537', '0648', '0711', '7389', '7394', '0455')
+
+```
+
+# Filtering
+
+## Filtering steps
+
+```{r}
+
+# Loop through and update each one
+for (df_name in df_names) {
+  df <- get(df_name)  # Get the data frame
+  sample_name <- sub("^final_neoantigens_", "", df_name)  # Extract sample name
+  df$sample <- sample_name  # Add sample column
+
+  df <- df[df$`Best MT IC50 Score` <= 500, ]
+  df <- df[df$`Tumor DNA VAF` > 0.05, ]
+
+  # Overwrite the original in the global environment
+  assign(df_name, df)  
+}
+
+# Patients without neoantigens predicted
+df_names_after_filtering <- df_names[!df_names %in% c(
+  "final_neoantigens_HX7416_DCIS",
+  "final_neoantigens_HX7419_DCIS",
+  "final_neoantigens_HX7419_IDC"
+)]
+
+# Initialize an empty list to store the modified data frames
+df_list <- list()
+
+# Loop through each data frame
+for (df_name in df_names_after_filtering) {
+  df <- get(df_name)
+
+  # Extract the sample name by removing the prefix
+  sample_name <- sub("^final_neoantigens_", "", df_name)
+
+  # Add a new column with the sample name
+  df$sample <- sample_name
+
+  # Add to list
+  df_list[[sample_name]] <- df
+}
+
+# Combine all into one data frame
+all_neoantigens <- do.call(rbind, df_list)
+
+# Group the IC50 MT in strong, mediam and weak
+all_neoantigens <- all_neoantigens %>%
+  mutate(binding = case_when(
+           `Best MT IC50 Score` < 50 ~ "strong",
+           `Best MT IC50 Score` >= 50 & `Best MT IC50 Score` < 150 ~ "medium",
+           `Best MT IC50 Score` >= 150 & `Best MT IC50 Score` <= 500 ~ "weak",
+           TRUE ~ "NA"
+         ))
+
+# Create my own fold change of MT / WT
+all_neoantigens <- all_neoantigens %>%
+  mutate(FC = `Best MT IC50 Score` / `Corresponding WT IC50 Score`)
+```
+
+## Add sample information
+
+```{r}
+
+# Get patientID information
+all_neoantigens$patientID <- sub("^HX(\\d+)_.*", "\\1", all_neoantigens$sample)
+
+# Add a 'type' column based on patient group
+all_neoantigens <- all_neoantigens %>%
+  mutate(type = case_when(
+    patientID %in% synchronous_patients ~ "DCIS & IDC (n=20)",
+    patientID %in% patients_only_idc ~ "pure IDC (n=6)",
+    patientID %in% patients_only_dcis ~ "pure DCIS (n=6)",
+    TRUE ~ "Unknown"
+  ))
+
+# Add a 'group' column based on patient group
+all_neoantigens$group <- sub(".*_", "", all_neoantigens$sample)
+
+```
+
+## Add updated gene expression (FPKM)
+
+```{r}
+# Load FPKM matrix
+expr_with_fpkm <- read.csv("/Users/sannepetersen/Documents/Bioinformatics and systems biology/NKI Bioinformatics/FPKM_expression.csv")
+
+# Add patient ID and group information
+expr_with_fpkm$patientID <- sub("HX(\\d+)\\..*", "\\1", expr_with_fpkm$sample)
+expr_with_fpkm$group <- sub(".*\\.(.*)", "\\1", expr_with_fpkm$sample)
+expr_with_fpkm$group <- gsub("IBC", "IDC", expr_with_fpkm$group)
+
+# Add fpkm data to all_neoantigens
+all_neoantigens_with_fpkm <- merge(
+  all_neoantigens,
+  expr_with_fpkm[, c("EnsemblGeneID", "patientID", "group", "FPKM")],
+  by.x = c("Ensembl Gene ID", "patientID", "group"),
+  by.y = c("EnsemblGeneID", "patientID", "group"),
+  all.x = TRUE  
+)
+
+# Filter FPKM >=1 
+all_neoantigens_with_fpkm <- all_neoantigens_with_fpkm[all_neoantigens_with_fpkm$FPKM >=1, ]
+
+```
+
+# Save df
+
+```{r}
+
+# Set cwd only for in this chunck
+setwd("/Users/sannepetersen/Documents/Bioinformatics and systems biology/NKI Bioinformatics/Bestanden")
+
+# Save the df
+write.table(all_neoantigens_with_fpkm, "all_neoantigens.txt", sep = "\t", quote = FALSE, row.names = FALSE)
+
+```

@@ -1,0 +1,1140 @@
+---
+title: "Load data"
+date: "2025-04-25"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Preparation
+
+## Install packages
+
+```{r}
+options(repos = c(CRAN = "https://cloud.r-project.org/"))
+
+# Install packages
+install.packages("vroom")
+install.packages("xfun")
+install.packages("readr")
+install.packages("dplyr")
+install.packages("R.utils")
+install.packages("tidyr")
+install.packages('BiocManager')
+install.packages("data.table")
+install.packages('ggplot2')
+install.packages('viridis')
+install.packages('tidyverse')
+install.packages("pathwayTMB")
+install.packages("vcfR")
+
+# Install packages from biomanager
+BiocManager::install("rtracklayer")
+BiocManager::install("GenomicFeatures")
+BiocManager::install("IRanges")
+BiocManager::install("BSgenome.Hsapiens.UCSC.hg38")
+BiocManager::install("biomaRt")
+BiocManager::install("maftools")
+
+# Install.packages from github
+remotes::install_github('CCICB/vcf2mafR')
+
+# Install if not already installed
+if (!requireNamespace("rtracklayer", quietly = TRUE)) {
+  BiocManager::install("rtracklayer")
+}
+
+```
+
+## Load packages
+
+```{r}
+
+# Load packages
+library(xfun)
+library(vroom)
+library(readr)
+library(dplyr)
+library(R.utils)
+library(tidyr)
+library(BiocManager)
+library(rtracklayer)
+library(IRanges)
+library(data.table)
+library(ggplot2)
+library(BSgenome)
+library(BSgenome.Hsapiens.UCSC.hg38)  
+library(biomaRt)
+library(viridis)
+library(tidyverse)
+library(maftools)
+library(vcf2mafR)
+library(RColorBrewer)
+library(pathwayTMB)
+library(maftools)
+library(stringr)
+library('vcfR')
+library(rtracklayer)
+library(data.table)
+library(GenomicRanges)
+library(dplyr)
+```
+
+# Load data
+
+### Patient IDs
+
+```{r}
+# Patient numbers with DCIS
+DCIS_patients <- c('7420','7419', '7416', '7408', '7402','7394', '7389', '7386', '7379', '7363', '0648', '0455', '0355', '0332', '0232', '0193', '0169')
+
+# Patient numbers with IDC
+IDC_patients <- c('7419', '7402', '0711', '0553', '0537', '0496', '0493', '0445', '0443', '0387', '0375', '0355', '0332', '0198', '0193', '0169')
+```
+
+## Load GTF file
+
+```{r}
+
+# Read GTF (tab-delimited)
+gtf_data <- fread("R:/Group Wesseling/06-Personal/s.petersen/gencode.v47.primary_assembly.annotation.gtf", sep = "\t", header = FALSE)
+
+# Add column names
+colnames(gtf_data) <- c(
+  "seqname",   
+  "source",   
+  "feature",    
+  "start",     
+  "end",        
+  "score",      
+  "strand",     
+  "frame",    
+  "attribute"   
+)
+
+
+# View first few lines
+head(gtf_data)
+
+# Extract gene_name from the attribute column
+gtf_data$SYMBOL <- sub('.*gene_name "([^"]+)".*', '\\1', gtf_data$attribute)
+
+# Extract chromosome number or letter from seqname
+gtf_data$Chrom <- sub("^chr", "", gtf_data$seqname)
+
+# Keep only gene information
+genes <- gtf_data[gtf_data$feature == "gene", ]
+
+# Create GRanges for genes
+gene_ranges <- GRanges(
+  seqnames = genes$Chrom,
+  ranges = IRanges(start = genes$start, end = genes$end),
+  gene = genes$SYMBOL
+)
+```
+
+## Load VCF data
+
+### Load DCIS data
+
+```{r}
+
+# Create an empty list to store data
+DCIS_vcf_data <- list()
+
+# Loop through each patient to load in DCIS data
+for (num in DCIS_patients) {
+  
+  # Insert file path
+  file_path <- paste0("R:/Group Wesseling/03-Projects/BC_CFMPB669_HeritX/03-Data/05-WES/gcf7322/vcf_annotated/7322_HX", num, "_DCIS_vs_Normal_annotated.vcf")
+  
+  # Read the file
+  df <- read_tsv(file_path, comment = "##", show_col_types = FALSE)
+  
+  # Add information
+  df$PatientID <- num
+  df$group <- 'DCIS'
+
+  # Add the processed data frame to the list
+  DCIS_vcf_data[[num]] <- df
+  assign(paste0("DCIS_vcf", num), df)
+}
+
+```
+
+### Load IDC data
+
+```{r}
+
+# Create an empty list to store data
+IDC_vcf_data <- list()
+
+# Loop through each patient to load in IDC data
+for (num in IDC_patients) {
+  
+  # Insert file path
+  file_path <- paste0("R:/Group Wesseling/03-Projects/BC_CFMPB669_HeritX/03-Data/05-WES/gcf7322/vcf_annotated/7322_HX", num, "_IDC_vs_Normal_annotated.vcf")
+  
+  # Read the file
+  df <- read.vcfR(file_path)
+  
+  # Adjust
+  fixed_data <- as.data.frame(df@fix)
+  genotype_data <- df@gt
+  genotype_df <- as.data.frame(genotype_data)
+  
+  # Combine dfs
+  df <- cbind(fixed_data, genotype_df)
+
+  # Add information
+  df$PatientID <- num
+  df$group <- 'IDC'
+
+  # Add the processed data frame to the list
+  IDC_vcf_data[[num]] <- df
+  assign(paste0("IDC_vcf", num), df)
+}
+```
+
+# Organize data
+
+## Organize vcf data
+
+### Patient df names
+
+```{r}
+# List of vcf patient data
+dcis_idc_dfs <- c(
+  "DCIS_vcf0169", "DCIS_vcf0193", "DCIS_vcf0232", "DCIS_vcf0332", "DCIS_vcf0355", "DCIS_vcf0455", "DCIS_vcf0648",
+  "DCIS_vcf7363", "DCIS_vcf7379", "DCIS_vcf7386", "DCIS_vcf7389", "DCIS_vcf7394", "DCIS_vcf7402", "DCIS_vcf7408",
+  "DCIS_vcf7416", "DCIS_vcf7419", "DCIS_vcf7420", "IDC_vcf0169", "IDC_vcf0193", "IDC_vcf0198", "IDC_vcf0332",
+  "IDC_vcf0355", "IDC_vcf0375", "IDC_vcf0387", "IDC_vcf0443", "IDC_vcf0445", "IDC_vcf0493", "IDC_vcf0496",
+  "IDC_vcf0537", "IDC_vcf0553", "IDC_vcf0711", "IDC_vcf7402", "IDC_vcf7419")
+```
+
+### Format columns
+
+Obtain separate columns for normal and tumor information.
+
+```{r}
+
+# The new column names
+format_cols <- c('GT', 'AD', 'AF', 'DP', 'F1R2', 'F2R1', 'FAD', 'SB')
+format_cols_normal <- c('GT_normal', 'AD_normal', 'AF_normal', 'DP_normal', 'F1R2_normal', 'F2R1_normal', 'FAD_normal', 'SB_normal')
+
+# Apply pivoting and transformation for the normal column
+for (df_name in dcis_idc_dfs) {
+  if (is.data.frame(get(df_name))) {
+    df <- get(df_name)
+    
+    # Obtain normal column
+    cols_normal <- grep("_Normal", names(df), value = TRUE)  
+    
+    # Split the column into separate columns
+    if (length(cols_normal) > 0) {
+      df <- df %>%
+        pivot_longer(cols = all_of(cols_normal), names_to = "Sample_normal", values_to = "Values") %>%
+        separate(Values, into = format_cols_normal, sep = ":", extra = "drop")
+      
+      # Overwrite the original data frame
+      assign(df_name, df)
+    }
+  }
+}
+
+# Apply the pivoting and transformation for the tumor column
+for (df_name in dcis_idc_dfs) {
+  if (is.data.frame(get(df_name))) {
+    df <- get(df_name)
+    
+    # Obtain tumor column (DCIS or IDC)
+    cols_dcis <- grep("_DCIS", names(df), value = TRUE)   
+    cols_idc <- grep("_IDC", names(df), value = TRUE)   
+    cols_tumor <- c(cols_dcis, cols_idc)
+
+    # Split the tumor column into separate columns
+    if (length(cols_tumor) > 0) {
+      df <- df %>%
+        pivot_longer(cols = all_of(cols_tumor), names_to = "Sample_tumor", values_to = "Values") %>%
+        separate(Values, into = format_cols, sep = ":", extra = "drop") %>%
+        
+        # Calculate mutated ratio
+        mutate(
+          number_normal = as.numeric(sapply(strsplit(AD, ","), `[`, 1)),
+          number_mutated = as.numeric(sapply(strsplit(AD, ","), `[`, 2)),
+          Total = number_normal + number_mutated,
+          Ratio_mut = number_mutated / Total )
+        
+      # Overwrite the original data frame 
+      assign(df_name, df)
+    }
+  }
+}
+```
+
+### Change the names of the first two columns
+
+```{r}
+# Change names of first two columns
+for (df_name in dcis_idc_dfs) {
+  df <- get(df_name)
+  df <- as.data.frame(df)
+
+  # Rename columns
+  colnames(df)[1] <- c("Chrom")
+  colnames(df)[2] <- c("Location")
+
+  # Assign back to original name
+  assign(df_name, df)
+}
+```
+
+## Combine VCF and GTF files
+
+### Patient df names
+
+```{r}
+# Create a list of data frames that start with DCIS for vcf data
+dcis_vcf_dfs_names <- c("DCIS_vcf0169", "DCIS_vcf0193", "DCIS_vcf0232", "DCIS_vcf0332", "DCIS_vcf0355", "DCIS_vcf0455", "DCIS_vcf0648", "DCIS_vcf7363", "DCIS_vcf7379", "DCIS_vcf7386", "DCIS_vcf7389", "DCIS_vcf7394", "DCIS_vcf7402", "DCIS_vcf7408" ,"DCIS_vcf7416", "DCIS_vcf7419", "DCIS_vcf7420")
+
+# Create a list of data frames that start with IDC for vcf data
+IDC_vcf_dfs_names <- c("IDC_vcf0169", "IDC_vcf0193", "IDC_vcf0198", "IDC_vcf0332", "IDC_vcf0355", "IDC_vcf0375", "IDC_vcf0387", "IDC_vcf0443", "IDC_vcf0445", "IDC_vcf0493", "IDC_vcf0496", "IDC_vcf0537", "IDC_vcf0553", "IDC_vcf0711" ,"IDC_vcf7402", "IDC_vcf7419")
+
+```
+
+### Add gene names DCIS dfs
+
+```{r}
+
+# Add gene names with GRanges
+for (i in seq_along(dcis_vcf_dfs_names)) {
+  
+  # Get the VCF data frame
+  dcis_vcf_df <- get(dcis_vcf_dfs_names[i])
+  
+  # Create GRanges for VCF variants
+  variant_ranges <- GRanges(
+    seqnames = dcis_vcf_df$Chrom,
+    ranges = IRanges(start = dcis_vcf_df$Location, end = dcis_vcf_df$Location)
+  )
+  
+  # Find overlaps
+  hits <- findOverlaps(variant_ranges, gene_ranges)
+  
+  # Initialize gene column with NA
+  dcis_vcf_df$Gene <- NA
+  
+  # Fill in matched genes
+  dcis_vcf_df$Gene[queryHits(hits)] <- mcols(gene_ranges[subjectHits(hits)])$gene
+  
+  # Remove duplicates where Gene starts with "ENSG" and there are other options
+  duplicates <- duplicated(dcis_vcf_df[c("Chrom", "Location")]) |
+                duplicated(dcis_vcf_df[c("Chrom", "Location")], fromLast = TRUE)
+  
+  dcis_vcf_df <- dcis_vcf_df[!(duplicates & grepl("^ENSG", dcis_vcf_df$Gene)), ]
+  
+  # Assign the final cleaned data frame
+  combined_name <- paste0("Combined_DCIS_", sub("DCIS_vcf", "", dcis_vcf_dfs_names[i]))
+  assign(combined_name, dcis_vcf_df)
+}
+```
+
+### Add gene names IDC dfs
+
+```{r}
+
+for (i in seq_along(IDC_vcf_dfs_names)) {
+  
+  # Get the VCF data frame
+  idc_vcf_df <- get(IDC_vcf_dfs_names[i])
+  
+  # Create GRanges for VCF variants
+  variant_ranges <- GRanges(
+    seqnames = idc_vcf_df$Chrom,
+  ranges = IRanges(start = as.numeric(idc_vcf_df$Location), end = as.numeric(idc_vcf_df$Location))
+  )
+  
+  # Find overlaps
+  hits <- findOverlaps(variant_ranges, gene_ranges)
+  
+  # Initialize gene column with NA
+  idc_vcf_df$Gene <- NA
+  
+  # Fill in matched genes
+  idc_vcf_df$Gene[queryHits(hits)] <- mcols(gene_ranges[subjectHits(hits)])$gene
+  
+  # Remove duplicates where Gene starts with "ENSG" and there are other options
+  duplicates <- duplicated(idc_vcf_df[c("Chrom", "Location")]) |
+                duplicated(idc_vcf_df[c("Chrom", "Location")], fromLast = TRUE)
+  
+  idc_vcf_df <- idc_vcf_df[!(duplicates & grepl("^ENSG", idc_vcf_df$Gene)), ]
+  
+  # Assign the final cleaned data frame
+  combined_name <- paste0("Combined_IDC_", sub("IDC_vcf", "", IDC_vcf_dfs_names[i]))
+  assign(combined_name, idc_vcf_df)
+}
+
+```
+
+# Filter data
+
+## Combined names
+
+```{r}
+# Filter for combined data frames 
+combined_names <- c(
+  "Combined_DCIS_0169", "Combined_DCIS_0193", "Combined_DCIS_0232", "Combined_DCIS_0332", "Combined_DCIS_0355",
+  "Combined_DCIS_0455", "Combined_DCIS_0648", "Combined_DCIS_7363", "Combined_DCIS_7379", "Combined_DCIS_7386",
+  "Combined_DCIS_7389", "Combined_DCIS_7394", "Combined_DCIS_7402", "Combined_DCIS_7408", "Combined_DCIS_7416",
+  "Combined_DCIS_7419", "Combined_DCIS_7420", 
+  "Combined_IDC_0169", "Combined_IDC_0193", "Combined_IDC_0198", "Combined_IDC_0332", "Combined_IDC_0355",
+  "Combined_IDC_0375", "Combined_IDC_0387", "Combined_IDC_0443", "Combined_IDC_0445", "Combined_IDC_0493",
+  "Combined_IDC_0496", "Combined_IDC_0537", "Combined_IDC_0553", "Combined_IDC_0711", "Combined_IDC_7402",
+  "Combined_IDC_7419"
+)
+
+```
+
+## Open combined_all_before.txt
+
+```{r}
+
+# Read the tab-delimited text file into R
+combined_all_before <- read.table("R:/Group Wesseling/03-Projects/BC_CFMPB669_HeritX/03-Data/05-WES/gcf7322/sanne_R/combined_all_before.txt", 
+                   sep = "\t", 
+                   header = TRUE, 
+                   stringsAsFactors = FALSE)
+
+```
+
+## Filtering paper Esther
+
+### Genes to exclude
+
+```{r}
+
+# Exclude highly polymorphic genes
+exclude_genes <- c('IGK', 'IGL', 'IGH', 'HLA-A', 'HLA-B', 'HLA-C', 'HLA-DQA1', 'HLA-DQB1', 'HLA-DRB1')
+
+```
+
+### Actual filtering
+
+```{r}
+
+# Filter based on DP, AF and exclude genes
+for (df_name in combined_names) {
+  # Get the data frames by their names
+  df <- get(df_name)
+  
+  # Make AF_normal column numeric
+  df$AF_normal <- as.numeric(df$AF_normal)
+  
+  # Apply filtering
+  df <- df[df$FILTER == 'PASS', ]
+  df <- df[df$DP >= 15, ]
+  df <- df[df$DP_normal >= 10, ]
+  df <- df[df$AF >= 0.02, ]
+  df <- df[df$AF_normal < 0.01, ]
+  df <- df[!df$Gene %in% exclude_genes, ]
+
+  # Assign the combined data frame back to the same name
+  assign(df_name, df)
+}
+
+```
+
+## Consequences to remove
+
+### Create a consequences column
+
+```{r}
+
+# Create a column with the mutation types
+for (df_name in combined_names) {
+  # Get the data frames by their names
+  df <- get(df_name)
+  
+  # Apply the function for each row to extract the mutation type
+  df$mutation_type <- sapply(df$INFO, function(info) {
+  # Extract the part of INFO column with CSQ
+  csq_field <- sub(".*CSQ=([^;]+).*", "\\1", info)
+  
+  # Extract the mutation type (second part of the CSQ field)
+  mutation_type <- strsplit(csq_field, "\\|")[[1]][2]
+  
+  return(mutation_type)
+})
+
+  # Assign the combined data frame back to the same name
+  assign(df_name, df)
+}
+
+# Only obtain one mutation type
+for (df_name in combined_names) {
+  # Get the data frame by its name
+  df <- get(df_name)
+  
+  # Apply the string split operation to each row 
+  df$mutation_type <- sapply(df$mutation_type, function(x) {
+    # Split the mutation type at "&" and keep only the first part
+    strsplit(x, "&")[[1]][1]
+  })
+  
+  # Assign the updated data frame back to the same name
+  assign(df_name, df)
+}
+```
+
+### Selected consequences
+
+```{r}
+
+# Select the consequences that you want to remove
+consequences_remove <- c('intron_variant', 'non_coding_transcript_exon_variant', 'synonymous_variant', 'regulatory_region_variant', 'upstream_gene_variant', 'downstream_gene_variant', 'intergenic_variant', '3_prime_UTR_variant', '5_prime_UTR_variant', 'TF_binding_site_variant', 'TFBS_ablation', 'stop_retained_variant')
+```
+
+### Remove consequences
+
+```{r}
+
+# Loop through the names and join the matching data frames
+for (df_name in combined_names) {
+  # Get the data frames by their names
+  df <- get(df_name)
+  
+  # Remove the selected consequences
+  df <- df[!df$mutation_type %in% consequences_remove, ]
+  
+  # Keep each distinct consequence per Location and chromosome
+  df <- df %>% 
+  
+    # Create mutation groups for plot
+    mutate(mutation = case_when(
+      mutation_type == "missense_variant" ~ "Missense Mutation",
+      mutation_type == "protein_altering_variant" ~ "Protein altering mutation",
+      mutation_type == "stop_gained" ~ "Nonsense Mutation",
+      mutation_type %in% c("splice_donor_region_variant", "splice_polypyrimidine_tract_variant", "splice_region_variant", 
+                       "splice_acceptor_variant", "splice_donor_variant", "splice_donor_5th_base_variant") ~ "Splice Site",
+      mutation_type == "inframe_insertion" ~ "In Frame Ins",
+    mutation_type == "frameshift_variant" & nchar(REF) > nchar(ALT) ~ "Frame Shift Del", 
+        mutation_type == "frameshift_variant" & nchar(REF) < nchar(ALT) ~ "Frame Shift Ins",  
+      mutation_type == "inframe_deletion" ~ "In Frame Del",
+      mutation_type == "start_lost" ~ "Start lost",
+      mutation_type == "stop_lost" ~ "Stop lost",
+      mutation_type == "incomplete_terminal_codon_variant " ~ "Incomplete terminal codon",
+
+    # In case there are any other consequences that don't match
+      TRUE ~ "Other"  
+    )) %>%
+  
+    # Remove NA rows
+    dplyr::filter(mutation != 'Other') %>%
+  
+    # Get a unique mutation for each gene
+    group_by(Gene) %>%
+    mutate(final_mut = ifelse(n_distinct(mutation) > 1, "Multi Hit", mutation)) %>%
+    ungroup() 
+
+  # Assign the combined data frame back to the same name
+  assign(df_name, df)
+}
+```
+
+# Combine
+
+## Create one df for combined data
+
+### Dfs without any mutations
+
+```{r}
+# These samples don't contain mutations after filtering
+empty <- c('Combined_DCIS_7389')
+
+```
+
+### Create one df
+
+```{r}
+
+# Obtain names of dfs/samples that do have mutations
+combined_names_adjusted <- base::setdiff(combined_names, empty)
+
+# Initialize an empty list to store all data frames
+combined_list <- list()
+
+# Loop through each data frame name in combined_names_DCIS
+for (df_name in combined_names) {
+  # Get the data frame by its name
+  df <- get(df_name)
+  
+  # Append the data frame to the list
+  combined_list[[length(combined_list) + 1]] <- df
+}
+
+# Loop through each data frame in the combined_list
+for (i in seq_along(combined_names)) {
+  # Convert the 'Location' column to character type
+  combined_list[[i]]$Location <- as.character(combined_list[[i]]$Location)
+}
+
+# Combine all data frames in the list into a single data frame
+combined_all <- bind_rows(combined_list)
+
+# Create the new 'sample' column by combining 'group' and 'PatientID'
+combined_all <- combined_all %>%
+  mutate(sample = paste(group, PatientID, sep = "_"))
+
+
+```
+
+### Save intermediate combined all
+
+```{r}
+# Set cwd only for in this chunck
+setwd("R:/Group Wesseling/03-Projects/BC_CFMPB669_HeritX/03-Data/05-WES/gcf7322/sanne_R")
+
+# Save the df
+write.table(combined_all, "combined_all.txt", sep = "\t", quote = FALSE, row.names = FALSE)
+```
+
+### Load previous combined_all
+
+```{r}
+
+# Read the tab-delimited text file into R
+#combined_all <- read.table("R:/Group Wesseling/03-Projects/BC_CFMPB669_HeritX/03-Data/05-WES/gcf7322/sanne_R/combined_all.txt", 
+                 #  sep = "\t", 
+               #    header = TRUE, 
+                  # stringsAsFactors = FALSE)
+
+#test <- combined_all[combined_all$PatientID == '7408', ]
+
+#test <- test[,c(1,2,4, 5, 6)]
+
+
+```
+
+```{r}
+
+# Set cwd only for in this chunck
+#setwd("R:/Group Wesseling/03-Projects/BC_CFMPB669_HeritX/03-Data/05-WES/gcf7322/sanne_R")
+
+#write.table(test, file = "filtered_7408.tsv", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+```
+
+### Hotspot mutations before
+
+```{r}
+
+# Create a data frame with Mutation and Genomic_Position
+PIK3CA_hotspot_df <- data.frame(
+  Mutation = c(
+    "K111E", "K111N", "K111N", "N345K", "N345K", "N345I", "N345T", "N345H",
+    "E365K", "E365Q", "E365V", "E453G", "E453K", "E453Q", "E453V",
+    "E542K", "E542Q", "E542V", "E542G", "E542A",
+    "E545A", "E545K", "E545G", "E545Q", "E545D", "E545D",
+    "Q546K", "Q546R", "Q546P", "Q546E", "Q546H", "Q546H", "Q546L",
+    "E722K", "E722D", "E726K",
+    "H1047R", "H1047L", "H1047Q", "H1047Q", "H1047Y", "H1047N"
+  ),
+  Genomic_Position = c(
+    "3:179199156:G", "3:179199158:C", "3:179199158:T", "3:179203765:A", "3:179203765:G",
+    "3:179203764:T", "3:179203764:C", "3:179203763:C", "3:179204536:A", "3:179204536:C",
+    "3:179204537:T", "3:179210292:G", "3:179210291:A", "3:179210291:C", "3:179210292:T",
+    "3:179218294:A", "3:179218294:C", "3:179218295:T", "3:179218295:G", "3:179218295:C",
+    "3:179218304:C", "3:179218303:A", "3:179218304:G", "3:179218303:C", "3:179218305:C", "3:179218305:T",
+    "3:179218306:A", "3:179218307:G", "3:179218307:C", "3:179218306:G", "3:179218308:C", "3:179218308:T", "3:179218307:T",
+    "3:179221134:A", "3:179221136:C", "3:179221146:A",
+    "3:179234297:G", "3:179234297:T", "3:179234298:G", "3:179234298:A", "3:179234296:T", "3:179234296:A"
+  ),
+  stringsAsFactors = FALSE
+)
+
+# TP53 hotspot mutations data frame
+tp53_hotspot_df <- data.frame(
+  Mutation = c(
+    "R175H", "R175G", "R175L", "R175C", "R175P", "R175S", "R175R", "R175R", "R175R",
+    "R273C", "R273H", "R273L", "R273S", "R273P", "R273G", "R273R", "R273R", "R273R",
+    "R110P", "R110L", "R110H",
+    "H168R", "H168L", "H168P", "H168Q", "H168Q", "H168D", "H168Y", "H168N", "H168H",
+    "V173L", "V173L", "V173G", "V173M",
+    "C176F", "C176Y", "C176W", "C176S", "C176S", "C176R", "C176G",
+    "I195T", "I195N", "I195F", "I195S",
+    "Y220C", "Y220H", "Y220S", "Y220N",
+    "Y234C", "Y234N", "Y234H",
+    "G245S", "G245D", "G245V", "G245C", "G245R", "G245A",
+    "R248Q", "R248W", "R248L", "R248P", "R248G",
+    "R249S", "R249S", "R249W", "R249T", "R249G", "R249M",
+    "R248L",
+    "R273H", "R273L", "R273C", "R273P", "R273S", "R273G",
+    "R280T", "R280K", "R280I", "R280G", "R280S", "R280S"
+  ),
+  Genomic_Position = c(
+    "17:7675088:T", "17:7675089:C", "17:7675088:A", "17:7675089:A", "17:7675088:G", "17:7675089:T", "17:7675087:T", "17:7675087:C", "17:7675087:A",
+    "17:7673803:A", "17:7673802:T", "17:7673802:A", "17:7673803:T", "17:7673802:G", "17:7673803:C", "17:7673801:T", "17:7673801:G", "17:7673801:C",
+    "17:7676040:G", "17:7676040:A", "17:7676040:T",
+    "17:7675109:C", "17:7675109:A", "17:7675109:G", "17:7675108:C", "17:7675108:T", "17:7675110:C", "17:7675110:A", "17:7675110:T", "17:7675108:A",
+    "17:7675095:A", "17:7675095:G", "17:7675094:C", "17:7675095:T",
+    "17:7675085:A", "17:7675085:T", "17:7675084:C", "17:7675086:T", "17:7675085:G", "17:7675086:G", "17:7675086:C",
+    "17:7674947:G", "17:7674947:T", "17:7674948:A", "17:7674947:C",
+    "17:7674872:C", "17:7674873:G", "17:7674872:G", "17:7674873:T",
+    "17:7674262:C", "17:7674263:T", "17:7674263:G",
+    "17:7674230:T", "17:7674229:T", "17:7674229:A", "17:7674230:A", "17:7674230:G", "17:7674229:G",
+    "17:7674220:T", "17:7674221:A", "17:7674220:A", "17:7674220:G", "17:7674221:C",
+    "17:7674216:A", "17:7674216:G", "17:7674218:A", "17:7674217:G", "17:7674218:C", "17:7674217:A",
+    "17:7674220:A",
+    "17:7673802:T", "17:7673802:A", "17:7673803:A", "17:7673802:G", "17:7673803:T", "17:7673803:C",
+    "17:7673781:G", "17:7673781:T", "17:7673781:A", "17:7673782:C", "17:7673780:A", "17:7673780:G"
+  ),
+  stringsAsFactors = FALSE
+)
+
+# Split cell into chrom, location and alt
+tp53_hotspot_df <- tp53_hotspot_df %>%
+  separate(Genomic_Position, into = c("Chrom", "Location", "ALT"), sep = ":", convert = TRUE)
+PIK3CA_hotspot_df <- PIK3CA_hotspot_df %>%
+  separate(Genomic_Position, into = c("Chrom", "Location", "ALT"), sep = ":", convert = TRUE)
+
+# Convert both Chrom and Location to same types in both data frames
+tp53_hotspot_df <- tp53_hotspot_df %>%
+  mutate(
+    Chrom = as.character(Chrom),
+    Location = as.numeric(Location)
+  )
+PIK3CA_hotspot_df <- PIK3CA_hotspot_df %>%
+  mutate(
+    Chrom = as.character(Chrom),
+    Location = as.numeric(Location)
+  )
+combined_all_before <- combined_all_before %>%
+  mutate(
+    Chrom = as.character(Chrom),
+    Location = as.numeric(Location)
+  )
+combined_all <- combined_all %>%
+  mutate(
+    Chrom = as.character(Chrom),
+    Location = as.numeric(Location)
+  )
+
+
+# Obtain only the locations for tp53
+loc_tp53 <- tp53_hotspot_df$Location
+
+# Check the tp53 hotspots before and after
+tp53_selected_before <- combined_all_before[combined_all_before$Location %in% loc_tp53, ]
+tp53_selected_after <- combined_all[combined_all$Location %in% loc_tp53, ]
+
+# Obtain only the locations for PIK3CA
+loc_PIK3CA <- PIK3CA_hotspot_df$Location
+
+# Check the pik3ca hotspots before and after
+PIK3CA_selected_before <- combined_all_before[combined_all_before$Location %in% loc_PIK3CA, ]
+PIK3CA_selected_after <- combined_all[combined_all$Location %in% loc_PIK3CA, ]
+
+# Create PIK3CA df
+PIK3CA_mutations <- combined_all_before[combined_all_before$Gene == 'PIK3CA', ]
+PIK3CA_mutations <- PIK3CA_mutations[rowSums(is.na(PIK3CA_mutations)) != ncol(PIK3CA_mutations), ]
+
+# Mutations to put back
+mut1_PIK3CA <- PIK3CA_mutations[PIK3CA_mutations$Location == '179234297', ]
+
+mut1_PIK3CA$type <- 'unknown'
+```
+
+## Check patients with both DCIS & IDC
+
+```{r}
+
+# Patients with DCIS or IDC or both
+patients_with_both <- c('0169', '0193', '0332', '0355', '7419', '7402')
+
+patients_only_idc <- c('0198', '0375', '0387', '0443', '0493', '0496', '0537', '0553', '0711', '0445')
+
+patients_only_dcis <- c('0648', '7363', '7379', '7386', 
+                        '7389', '7394', '7408', '7416', '7420',
+                        '0232', '0455')
+
+# Add a 'type' column based on patient group
+combined_all <- combined_all %>%
+  mutate(type = case_when(
+    PatientID %in% patients_with_both ~ "DCIS & IDC",
+    PatientID %in% patients_only_idc ~ "IDC",
+    PatientID %in% patients_only_dcis ~ "DCIS",
+    TRUE ~ "Unknown" 
+  ))
+
+# Add a 'type' column based on patient group
+combined_all_before <- combined_all_before %>%
+  mutate(type = case_when(
+    PatientID %in% patients_with_both ~ "DCIS & IDC",
+    PatientID %in% patients_only_idc ~ "IDC",
+    PatientID %in% patients_only_dcis ~ "DCIS",
+    TRUE ~ "Unknown" 
+  ))
+
+```
+
+### Check patient 0169
+
+```{r}
+
+# Select patient 0169 filtered data
+patient_0169 <- combined_all[combined_all$PatientID == '0169', ]
+patient_0169_DCIS <- patient_0169[patient_0169$group == 'DCIS', ]
+patient_0169_IDC <- patient_0169[patient_0169$group == 'IDC', ]
+
+# Select patient 0169 before filtering data
+patient_0169_before <- combined_all_before[combined_all_before$PatientID == '169', ]
+patient_0169_DCIS_before <- patient_0169_before[patient_0169_before$group == 'DCIS', ]
+patient_0169_IDC_before <- patient_0169_before[patient_0169_before$group == 'IDC', ]
+
+# Obtain dfs that contain the filtered mutations
+filtered_out_0169_DCIS <- anti_join(
+  patient_0169_DCIS_before %>% mutate(Location = as.character(Location)),
+  patient_0169_DCIS %>% mutate(Location = as.character(Location)),
+  by = c("Gene", "Location", "Chrom", "REF")
+)
+
+# Obtain dfs that contain the filtered mutations
+filtered_out_0169_IDC <- anti_join(
+  patient_0169_IDC_before %>% mutate(Location = as.character(Location)),
+  patient_0169_IDC %>% mutate(Location = as.character(Location)),
+  by = c("Gene", "Location", "Chrom", "REF")
+)
+
+
+# See if IDC has after filtering mutations that are filtered out in DCIS
+shared_mutations_0169 <- inner_join(
+  filtered_out_0169_DCIS,
+  patient_0169_IDC,
+  by = c("Gene", "Location", "Chrom")
+)
+
+# See if DCIS has after filtering mutations that are filtered out in IDC
+shared_mutations_0169_1 <- inner_join(
+  filtered_out_0169_IDC,
+  patient_0169_DCIS,
+  by = c("Gene", "Location", "Chrom")
+)
+
+```
+
+### Check patient 0193
+
+```{r}
+
+# Select patient 0193 filtered data
+patient_0193 <- combined_all[combined_all$PatientID == '0193', ]
+patient_0193_DCIS <- patient_0193[patient_0193$group == 'DCIS', ]
+patient_0193_IDC <- patient_0193[patient_0193$group == 'IDC', ]
+
+# Select patient 0193 before filtering data
+patient_0193_before <- combined_all_before[combined_all_before$PatientID == '193', ]
+patient_0193_DCIS_before <- patient_0193_before[patient_0193_before$group == 'DCIS', ]
+patient_0193_IDC_before <- patient_0193_before[patient_0193_before$group == 'IDC', ]
+
+# Obtain dfs that contain the filtered mutations
+filtered_out_0193_DCIS <- anti_join(
+  patient_0193_DCIS_before %>% mutate(Location = as.character(Location)),
+  patient_0193_DCIS %>% mutate(Location = as.character(Location)),
+  by = c("Gene", "Location", "Chrom", "REF")
+)
+
+# Obtain dfs that contain the filtered mutations
+filtered_out_0193_IDC <- anti_join(
+  patient_0193_IDC_before %>% mutate(Location = as.character(Location)),
+  patient_0193_IDC %>% mutate(Location = as.character(Location)),
+  by = c("Gene", "Location", "Chrom", "REF")
+)
+
+# not the same ALT
+# See if IDC has after filtering mutations that are filtered out in DCIS
+shared_mutations_0193 <- inner_join(
+  filtered_out_0193_DCIS,
+  patient_0193_IDC,
+  by = c("Gene", "Location", "Chrom")
+)
+
+# Exactly the same ALT
+# See if DCIS has after filtering mutations that are filtered out in IDC
+shared_mutations_0193_1 <- inner_join(
+  filtered_out_0193_IDC,
+  patient_0193_DCIS,
+  by = c("Gene", "Location", "Chrom")
+)
+
+```
+
+### Check patient 0332
+
+```{r}
+
+# Select patient 0332 filtered data
+patient_0332 <- combined_all[combined_all$PatientID == '0332', ]
+patient_0332_DCIS <- patient_0332[patient_0332$group == 'DCIS', ]
+patient_0332_IDC <- patient_0332[patient_0332$group == 'IDC', ]
+
+# Select patient 0332 before filtering data
+patient_0332_before <- combined_all_before[combined_all_before$PatientID == '332', ]
+patient_0332_DCIS_before <- patient_0332_before[patient_0332_before$group == 'DCIS', ]
+patient_0332_IDC_before <- patient_0332_before[patient_0332_before$group == 'IDC', ]
+
+# Obtain dfs that contain the filtered mutations
+filtered_out_0332_DCIS <- anti_join(
+  patient_0332_DCIS_before %>% mutate(Location = as.character(Location)),
+  patient_0332_DCIS %>% mutate(Location = as.character(Location)),
+  by = c("Gene", "Location", "Chrom", "REF")
+)
+
+# Obtain dfs that contain the filtered mutations
+filtered_out_0332_IDC <- anti_join(
+  patient_0332_IDC_before %>% mutate(Location = as.character(Location)),
+  patient_0332_IDC %>% mutate(Location = as.character(Location)),
+  by = c("Gene", "Location", "Chrom", "REF")
+)
+
+# Exactly the same ALT
+# See if IDC has after filtering mutations that are filtered out in DCIS
+shared_mutations_0332 <- inner_join(
+  filtered_out_0332_DCIS,
+  patient_0332_IDC,
+  by = c("Gene", "Location", "Chrom")
+)
+
+# Exactly the same ALT
+# See if DCIS has after filtering mutations that are filtered out in IDC
+shared_mutations_0332_1 <- inner_join(
+  filtered_out_0332_IDC,
+  patient_0332_DCIS,
+  by = c("Gene", "Location", "Chrom")
+)
+
+```
+
+### Check patient 0355
+
+```{r}
+
+# Select patient 0355 filtered data
+patient_0355 <- combined_all[combined_all$PatientID == '0355', ]
+patient_0355_DCIS <- patient_0355[patient_0355$group == 'DCIS', ]
+patient_0355_IDC <- patient_0355[patient_0355$group == 'IDC', ]
+
+# Select patient 0355 before filtering data
+patient_0355_before <- combined_all_before[combined_all_before$PatientID == '355', ]
+patient_0355_DCIS_before <- patient_0355_before[patient_0355_before$group == 'DCIS', ]
+patient_0355_IDC_before <- patient_0355_before[patient_0355_before$group == 'IDC', ]
+
+# Obtain dfs that contain the filtered mutations
+filtered_out_0355_DCIS <- anti_join(
+  patient_0355_DCIS_before %>% mutate(Location = as.character(Location)),
+  patient_0355_DCIS %>% mutate(Location = as.character(Location)),
+  by = c("Gene", "Location", "Chrom", "REF")
+)
+
+# Obtain dfs that contain the filtered mutations
+filtered_out_0355_IDC <- anti_join(
+  patient_0355_IDC_before %>% mutate(Location = as.character(Location)),
+  patient_0355_IDC %>% mutate(Location = as.character(Location)),
+  by = c("Gene", "Location", "Chrom", "REF")
+)
+
+# Not exactly the same deletion
+# See if IDC has after filtering mutations that are filtered out in DCIS
+shared_mutations_0355 <- inner_join(
+  filtered_out_0355_DCIS,
+  patient_0355_IDC,
+  by = c("Gene", "Location", "Chrom")
+)
+
+# See if DCIS has after filtering mutations that are filtered out in IDC
+shared_mutations_0355_1 <- inner_join(
+  filtered_out_0355_IDC,
+  patient_0355_DCIS,
+  by = c("Gene", "Location", "Chrom")
+)
+
+```
+
+### Check patient 7419
+
+```{r}
+
+# Select patient 7419 filtered data
+patient_7419 <- combined_all[combined_all$PatientID == '7419', ]
+patient_7419_DCIS <- patient_7419[patient_7419$group == 'DCIS', ]
+patient_7419_IDC <- patient_7419[patient_7419$group == 'IDC', ]
+
+# Select patient 7419 before filtering data
+patient_7419_before <- combined_all_before[combined_all_before$PatientID == '7419', ]
+patient_7419_DCIS_before <- patient_7419_before[patient_7419_before$group == 'DCIS', ]
+patient_7419_IDC_before <- patient_7419_before[patient_7419_before$group == 'IDC', ]
+
+# Obtain dfs that contain the filtered mutations
+filtered_out_7419_DCIS <- anti_join(
+  patient_7419_DCIS_before %>% mutate(Location = as.character(Location)),
+  patient_7419_DCIS %>% mutate(Location = as.character(Location)),
+  by = c("Gene", "Location", "Chrom", "REF")
+)
+
+# Obtain dfs that contain the filtered mutations
+filtered_out_7419_IDC <- anti_join(
+  patient_7419_IDC_before %>% mutate(Location = as.character(Location)),
+  patient_7419_IDC %>% mutate(Location = as.character(Location)),
+  by = c("Gene", "Location", "Chrom", "REF")
+)
+
+# See if IDC has after filtering mutations that are filtered out in DCIS
+shared_mutations_7419 <- inner_join(
+  filtered_out_7419_DCIS,
+  patient_7419_IDC,
+  by = c("Gene", "Location", "Chrom")
+)
+
+# See if DCIS has after filtering mutations that are filtered out in IDC
+shared_mutations_7419_1 <- inner_join(
+  filtered_out_7419_IDC,
+  patient_7419_DCIS,
+  by = c("Gene", "Location", "Chrom")
+)
+
+```
+
+### Check patient 7402
+
+```{r}
+
+# Select patient 7402 filtered data
+patient_7402 <- combined_all[combined_all$PatientID == '7402', ]
+patient_7402_DCIS <- patient_7402[patient_7402$group == 'DCIS', ]
+patient_7402_IDC <- patient_7402[patient_7402$group == 'IDC', ]
+
+# Select patient 7402 before filtering data
+patient_7402_before <- combined_all_before[combined_all_before$PatientID == '7402', ]
+patient_7402_DCIS_before <- patient_7402_before[patient_7402_before$group == 'DCIS', ]
+patient_7402_IDC_before <- patient_7402_before[patient_7402_before$group == 'IDC', ]
+
+# Obtain dfs that contain the filtered mutations
+filtered_out_7402_DCIS <- anti_join(
+  patient_7402_DCIS_before %>% mutate(Location = as.character(Location)),
+  patient_7402_DCIS %>% mutate(Location = as.character(Location)),
+  by = c("Gene", "Location", "Chrom", "REF")
+)
+
+# Obtain dfs that contain the filtered mutations
+filtered_out_7402_IDC <- anti_join(
+  patient_7402_IDC_before %>% mutate(Location = as.character(Location)),
+  patient_7402_IDC %>% mutate(Location = as.character(Location)),
+  by = c("Gene", "Location", "Chrom", "REF")
+)
+
+# See if IDC has after filtering mutations that are filtered out in DCIS
+shared_mutations_7402 <- inner_join(
+  filtered_out_7402_DCIS,
+  patient_7402_IDC,
+  by = c("Gene", "Location", "Chrom")
+)
+
+# See if DCIS has after filtering mutations that are filtered out in IDC
+shared_mutations_7402_1 <- inner_join(
+  filtered_out_7402_IDC,
+  patient_7402_DCIS,
+  by = c("Gene", "Location", "Chrom")
+)
+
+```
+
+### Create df with mutations to put back
+
+```{r}
+
+# Select the mutations
+mut2<- patient_0193_IDC_before[patient_0193_IDC_before$Location == '197122471', ] #missense_variant
+mut3<- patient_0193_IDC_before[patient_0193_IDC_before$Location == '41661442', ]
+#missense_variant
+mut4 <- patient_0332_DCIS_before[patient_0332_DCIS_before$Location == '101264868', ]
+#missense_variant
+mut5 <- patient_0332_DCIS_before[patient_0332_DCIS_before$Location == '51523423', ]
+#missense_variant
+mut6 <- patient_0332_DCIS_before[patient_0332_DCIS_before$Location == '130192750', ]
+#missense_variant
+mut7<- patient_0332_IDC_before[patient_0332_IDC_before$Location == '73354207', ]
+#missense_variant
+
+# Mutation 8
+mut8<- patient_0355_DCIS_before[patient_0355_DCIS_before$Location == '74543948', ] # inframe_deletion
+mut8$mutation_type <- 'inframe_deletion'
+mut8$mutation <- 'In Frame Del'
+mut8$final_mut <- 'In Frame Del'
+
+# Combine all mutations to put back
+df_mut_back <- rbind(mut2, mut3, mut4, mut5, mut6, mut7, mut1_PIK3CA)
+
+# Create a column with the mutation types in df_mut_back
+df_mut_back$mutation_type <- 'missense_variant'
+df_mut_back$mutation <- 'Missense Mutation'
+df_mut_back$final_mut <- 'Missense Mutation'
+
+# Bind mutation 8 and 9 with the rest
+df_mut_back <- rbind(mut8, df_mut_back)
+
+# Combine mutations to add back with combined df
+combined_all <- rbind(combined_all, df_mut_back)
+combined_all <- combined_all %>% unique()
+
+# Recalculate the final mutation type
+combined_all <- combined_all %>%
+  
+  # Create mutation groups for plot
+  mutate(mutation = case_when(
+    mutation_type == "missense_variant" ~ "Missense Mutation",
+    mutation_type == "protein_altering_variant" ~ "Protein altering mutation",
+    mutation_type == "stop_gained" ~ "Nonsense Mutation",
+    mutation_type %in% c("splice_donor_region_variant", "splice_polypyrimidine_tract_variant", "splice_region_variant", 
+                         "splice_acceptor_variant", "splice_donor_variant", "splice_donor_5th_base_variant") ~ "Splice Site",
+    mutation_type == "inframe_insertion" ~ "In Frame Ins",
+    mutation_type == "frameshift_variant" & nchar(REF) > nchar(ALT) ~ "Frame Shift Del", 
+    mutation_type == "frameshift_variant" & nchar(REF) < nchar(ALT) ~ "Frame Shift Ins",  
+    mutation_type == "inframe_deletion" ~ "In Frame Del",
+    mutation_type == "start_lost" ~ "Start lost",
+    mutation_type == "stop_lost" ~ "Stop lost",
+    mutation_type == "incomplete_terminal_codon_variant " ~ "Incomplete terminal codon",
+  
+    # In case there are any other consequences that don't match
+    TRUE ~ "Other"  
+  )) %>%
+  
+  # Remove rows with 'Other' mutation types
+  filter(mutation != 'Other') %>%
+  
+  # Get a unique mutation for each gene
+  group_by(Gene, PatientID) %>%
+  mutate(final_mut = ifelse(n_distinct(mutation) > 1, "Multi Hit", mutation)) %>%
+  ungroup()
+```
+
+## Save combined df
+
+```{r}
+
+# Set cwd only for in this chunck
+setwd("R:/Group Wesseling/03-Projects/BC_CFMPB669_HeritX/03-Data/05-WES/gcf7322/sanne_R")
+
+# Save the df
+write.table(combined_all, "combined_all.txt", sep = "\t", quote = FALSE, row.names = FALSE)
+
+# Count occurrences of each SYMBOL and order
+symbol_counts <- combined_all %>%
+  count(Gene) %>%  
+  arrange(desc(n))  
+
+```
